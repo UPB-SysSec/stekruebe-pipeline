@@ -1,0 +1,4 @@
+backup/
+*.log
+out/
+tranco_*.csv

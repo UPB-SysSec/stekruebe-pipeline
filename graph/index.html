@@ -1,0 +1,213 @@
+<head>
+    <style>
+        body {
+            margin: 0;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="header">
+        <noscript>Please Enable JS</noscript>
+        <!-- easily change i -->
+        <button onclick="window.location.href = `./?i=${filenum-1}&g=${graphType}`">-</button>
+        i=<span id="filenum"></span>
+        <button onclick="window.location.href = `./?i=${filenum+1}&g=${graphType}`">+</button>
+        <!-- render engine drowpdown -->
+        <select onchange="window.location.href = `./?i=${filenum}&g=${this.value}`" id="engine">
+            <option value="2d">2D</option>
+            <option value="3d">3D</option>
+            <option value="vr">VR</option>
+            <option value="ar">AR</option>
+        </select>
+        <!-- link to overview -->
+        <a href="/dot.html" id="overview">Overview</a>
+    </div>
+    <div id="graph"></div>
+    <script>
+        let hover = true;
+        function initGraph() {
+            fetch(filepath).then(res => res.json()).then(data => {
+                let Graph;
+                switch (graphType) {
+                    case "3d":
+                        Graph = ForceGraph3D();
+                        break;
+                    case "vr":
+                        Graph = ForceGraphVR();
+                        break;
+                    case "ar":
+                        Graph = ForceGraphAR();
+                        break;
+
+                    case "2d":
+                    default:
+                        Graph = ForceGraph();
+                        break;
+                }
+
+                if (hover) {
+                    let nodesDict = {};
+                    data.nodes.forEach(node => {
+                        nodesDict[node.id] = node;
+                    });
+                    // cross-link node objects
+                    data.links.forEach(link => {
+                        const a = nodesDict[link.source];
+                        const b = nodesDict[link.target];
+                        !a.neighbors && (a.neighbors = []);
+                        !b.neighbors && (b.neighbors = []);
+                        a.neighbors.push(b);
+                        b.neighbors.push(a);
+
+                        !a.links && (a.links = []);
+                        !b.links && (b.links = []);
+                        a.links.push(link);
+                        b.links.push(link);
+                    });
+                }
+                const hoverHighlightNodes = new Set();
+                const highlightLinks = new Set();
+                let clickedNode = null;
+                const clickedHighlightNodes = new Set();
+                const clickedHighlightLinks = new Set();
+                let hoverNode = null;
+                const NODE_R = 4;
+
+                graphObj = Graph(document.getElementById('graph'))
+                    .graphData(data)
+                    .nodeId('id')
+                    .nodeLabel('id')
+                    .nodeColor(node => {
+                        switch (node.group) {
+                            case 0:
+                                // domain
+                                return "#ED6A5A";
+                            case 1:
+                                // IP
+                                if (node.id.includes(":")) {
+                                    // ipv6
+                                    return "#2BAEFF";
+                                }
+                                return "#6184D8";
+                            case 2:
+                                // PREFIX_4
+                                return "#8DFF63";
+                            case 3:
+                                // PREFIX_16
+                                return "#65C683";
+
+                            default:
+                                return "black";
+                        }
+                    })
+                    .onNodeClick((node, event) => {
+                        navigator.clipboard.writeText(node.id);
+                    })
+                    .linkSource('source')
+                    .linkTarget('target')
+
+                if (hover) {
+                    graphObj
+                        .nodeRelSize(NODE_R)
+                        .onNodeClick((node, event) => {
+                            navigator.clipboard.writeText(node.id);
+                            clickedHighlightNodes.clear();
+                            clickedHighlightLinks.clear();
+                            if (node === clickedNode) {
+                                clickedNode = null;
+                                return;
+                            }
+                            clickedNode = node;
+                            clickedHighlightNodes.add(node);
+                            node.neighbors.forEach(neighbor => clickedHighlightNodes.add(neighbor));
+                            node.links.forEach(link => clickedHighlightLinks.add(link));
+                        })
+                        .onNodeHover(node => {
+                            hoverHighlightNodes.clear();
+                            highlightLinks.clear();
+                            if (node) {
+                                hoverHighlightNodes.add(node);
+                                node.neighbors.forEach(neighbor => hoverHighlightNodes.add(neighbor));
+                                node.links.forEach(link => highlightLinks.add(link));
+                            }
+
+                            hoverNode = node || null;
+                        })
+                        // .onLinkHover(link => {
+                        //     hoverHighlightNodes.clear();
+                        //     highlightLinks.clear();
+
+                        //     if (link) {
+                        //         highlightLinks.add(link);
+                        //         hoverHighlightNodes.add(link.source);
+                        //         hoverHighlightNodes.add(link.target);
+                        //     }
+                        // })
+                        .linkWidth(link => highlightLinks.has(link) || clickedHighlightLinks.has(link) ? 5 : 1)
+                        .nodeCanvasObjectMode(node => hoverHighlightNodes.has(node) || clickedHighlightNodes.has(node) ? 'before' : undefined)
+                        .nodeCanvasObject((node, ctx) => {
+                            // add ring just for highlighted nodes
+                            ctx.beginPath();
+                            ctx.arc(node.x, node.y, NODE_R * 1.5, 0, 2 * Math.PI, false);
+                            let isClickedHighlight = clickedHighlightNodes.has(node);
+                            let isHoverHighlight = hoverHighlightNodes.has(node);
+                            let isTargetNode = node === clickedNode || node === hoverNode;
+                            if (isClickedHighlight & isHoverHighlight) {
+                                // green/cyan
+                                ctx.fillStyle = isTargetNode ? "#09ff00" : '#00ffa6';
+                            } else if (isClickedHighlight) {
+                                // blue/purple
+                                ctx.fillStyle = isTargetNode ? "#004cff" : '#7300ff';
+                            } else if (isHoverHighlight) {
+                                // red/orange
+                                ctx.fillStyle = isTargetNode ? "#ff0000" : '#ff6f00';
+                            }
+                            ctx.fill();
+                        })
+                        .autoPauseRedraw(false) // keep redrawing after engine has stopped
+                }
+            });
+        }
+
+        function addScript(url) {
+            var script = document.createElement('script');
+            script.type = 'text/javascript';
+            script.src = url;
+            script.onload = initGraph;
+            document.getElementsByTagName('head')[0].appendChild(script);
+        }
+
+        let filenum = parseInt(new URL(window.location).searchParams.get("i"));
+        if (isNaN(filenum)) {
+            filenum = 12;
+        }
+
+        let filepath = `./clusters/json/${filenum}.json`;
+        let graphType = new URL(window.location).searchParams.get("g");
+
+        switch (graphType) {
+            case "3d":
+                addScript("https://unpkg.com/3d-force-graph");
+                break;
+            case "vr":
+                addScript("https://unpkg.com/3d-force-graph-vr");
+                break;
+            case "ar":
+                addScript("https://unpkg.com/aframe");
+                addScript("https://unpkg.com/@ar-js-org/ar.js");
+                addScript("https://unpkg.com/3d-force-graph-ar");
+                break;
+
+            case "2d":
+            default:
+                graphType = "2d";
+                addScript("https://unpkg.com/force-graph");
+                break;
+        }
+
+        document.getElementById("filenum").innerHTML = filenum;
+        document.getElementById("engine").value = graphType;
+        document.getElementById("overview").href = `/dot.html?from=${filenum - (filenum % 100)}`;
+    </script>
+</body>
