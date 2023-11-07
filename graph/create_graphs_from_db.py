@@ -111,7 +111,7 @@ class DotGraphSerializer(GraphSerializer):
         source, target = edge.nodes
         source_id = source._properties.get(self._get_id_key(source)),
         target_id = target._properties.get(self._get_id_key(target)),
-        file.write('"{source_id}" -- "{target_id}";\n')
+        file.write(f'"{source_id}" -- "{target_id}";\n')
 
     def write(self):
         os.makedirs(os.path.dirname(self.path_to_file), exist_ok=True)
