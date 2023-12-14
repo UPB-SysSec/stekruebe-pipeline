@@ -1,10 +1,13 @@
-from neo4j import GraphDatabase, Driver
+from typing import Any
+from neo4j import GraphDatabase, Driver, Session, Result
 from enum import Enum
 import time
 from dataclasses import dataclass
 import datetime
 from multiprocessing.pool import ThreadPool
 from threading import Thread
+import inspect
+import os.path as op
 
 with open("neo4j/credentials") as f:
     user, password = f.read().strip().split(":")
@@ -22,12 +25,24 @@ class Connectable:
         return f"<Connectable {self.ip!r}:{self.port!r}>"
 
 
+@dataclass
+class _DBStats:
+    executed_queries: int = 0
+    done_queries: int = 0
+    db_hits: int = 0
+    time_ready: int = 0
+    time_consumed: int = 0
+
+
 class _Stats:
     def __init__(self) -> None:
         self.domains = 0
         self.targets = 0
         self.expected_domains = 0
         self.start_time = 0
+        self.db = {}
+        self.executed_queries = 0
+        self.done_queries = 0
 
     def start(self, expected_domains: int):
         self.start_time = time.time()
@@ -39,6 +54,33 @@ class _Stats:
     def done_targets(self, n):
         self.targets += n
 
+    def performed_query(self, result: Result):
+        callsite = inspect.stack()[2]
+        callsite_str = f"{callsite.function}({callsite.lineno})"
+        if callsite_str not in self.db:
+            self.db[callsite_str] = _DBStats()
+        dbstats: _DBStats = self.db[callsite_str]
+        if result is not None:
+            original_close = result._on_closed
+            # 0 is this function, 1 is _Profile{Session/Driver}, 2 is the actual caller
+
+            def _result_closed():
+                # summary = result.consume()
+                summary = result._obtain_summary()
+                dbstats.done_queries += 1
+                self.done_queries += 1
+                hits = summary.profile["dbHits"]
+                for child in summary.profile["children"]:
+                    hits += child["dbHits"]
+                dbstats.db_hits += hits
+                dbstats.time_ready += summary.result_available_after
+                dbstats.time_consumed += summary.result_consumed_after
+                return original_close()
+
+            result._on_closed = _result_closed
+        dbstats.executed_queries += 1
+        self.executed_queries += 1
+
     def __str__(self) -> str:
         elapsed = time.time() - self.start_time
         if self.domains == 0:
@@ -48,12 +90,30 @@ class _Stats:
             ETA = (self.expected_domains - self.domains) / (self.domains / elapsed)
             DURATION = datetime.timedelta(seconds=elapsed + ETA)
             ETA = datetime.timedelta(seconds=ETA)
-        return (
+        ret = (
             f"Total: {self.domains} domains, {self.targets} targets in {elapsed:.2f} seconds | "
             f"{self.domains/elapsed:.2f} domains/s {100.0*self.domains/self.expected_domains:5.2f}% | "
             f"ETA: {ETA} / Total: {DURATION} | "
             f"{self.targets/elapsed:.2f} targets/s"
         )
+        if self.executed_queries > 0:
+            ret += "\n"
+            if self.done_queries == 0:
+                ret += f"{self.done_queries} queries executed"
+            else:
+                # we have stats for results
+                ret += f"{self.done_queries} queries executed ({self.executed_queries - self.done_queries} open)\n"
+                ret_stats = []
+                for callsite, stats in self.db.items():
+                    ret_stats.append(
+                        f"  {callsite}\n"
+                        f"    {stats.executed_queries} executed ({stats.executed_queries - stats.done_queries} open)\n"
+                        f"    {stats.db_hits/(stats.done_queries or 1):.1f} avg DB hits/query\n"
+                        f"    {stats.time_ready/(stats.done_queries or 1):.1f}ms avg results ready | {stats.time_consumed/(stats.done_queries or 1):.1f}ms avg results consume"
+                    )
+                ret += "\n".join(ret_stats)
+
+        return ret
 
 
 STATS = _Stats()
@@ -70,6 +130,57 @@ def _stats_printer():
 Thread(target=_stats_printer, daemon=True, name="Stats Printer").start()
 
 
+class _ProfileSession:
+    def __init__(self, stats: _Stats, inner: Session, profile: bool) -> None:
+        self._stats = stats
+        self._session = inner
+        self._profile = profile
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    def __enter__(self):
+        res = self._session.__enter__()
+        assert res is self._session
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return self._session.__exit__(exc_type, exc_value, traceback)
+
+    def run(self, query: str, *args, **kwargs):
+        if self._profile:
+            query_res = self._session.run("PROFILE " + query, *args, **kwargs)
+            self._stats.performed_query(query_res)
+        else:
+            query_res = self._session.run(query, *args, **kwargs)
+            self._stats.performed_query()
+
+        return query_res
+
+
+class _ProfileDriver:
+    def __init__(self, stats: _Stats, inner: Driver, profile: bool) -> None:
+        self._stats = stats
+        self._driver = inner
+        self._profile = profile
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._driver, name)
+
+    def execute_query_TODO(self, query: str, *args, **kwargs):
+        if self._profile:
+            query_res = self._driver.execute_query("PROFILE " + query, *args, **kwargs)
+            self._stats.performed_query(query_res)
+        else:
+            query_res = self._driver.execute_query(query, *args, **kwargs)
+            self._stats.performed_query()
+
+        return query_res
+
+    def session(self):
+        return _ProfileSession(self._stats, self._driver.session(), self._profile)
+
+
 def scan(domain_from: str, addr_from: Connectable, *targed_addrs: Connectable):
     # dummy interface for scan.py
     # print(f"Scanning {domain_from!r} from {addr_from!r} to {len(targed_addrs)} targets")
@@ -81,7 +192,6 @@ class IPType(Enum):
     V6 = "IPV6"
 
 
-# TODO dry v4 and v6
 _BASE_QUERY = """
 CALL {{
     MATCH (d1:DOMAIN {{domain: $domain}})--(ip1:IP {{ip: $ip}})--(p:PREFIX)--(ip2:{ip_target_type})--(d2:DOMAIN)
@@ -138,25 +248,47 @@ class Domain:
         STATS.done_domain()
 
 
-def get_domains(driver: Driver, cluster: int = None):
+def get_domains(driver: Driver, cluster: int = None, limit: int = None):
     with driver.session() as session:
         if cluster is None:
-            query = session.run("MATCH (n: DOMAIN) RETURN n.domain AS domain")
+            query = "MATCH (n: DOMAIN) RETURN n.domain AS domain"
         else:
             assert isinstance(cluster, int)
-            query = session.run("MATCH (n: DOMAIN {clusterID: $cluster}) RETURN n.domain AS domain", cluster=cluster)
+            query = "MATCH (n: DOMAIN {clusterID: $cluster}) RETURN n.domain AS domain"
+        if limit is not None:
+            query += f" LIMIT $limit"
+        query = session.run(query, cluster=cluster, limit=limit)
         for record in query:
             yield Domain(record.get("domain"))
 
 
-def main(parallelize):
+def print_dummy_query():
+    print(
+        "PROFILE\n"
+        + _BASE_QUERY.format(ip_target_type="IP")
+        .replace("$domain", '"r3---sn-5uaeznes.googlevideo.com"')
+        .replace("$ip", '"172.217.128.200"')
+    )
+
+
+def main(parallelize, create_indexes=True, profile=True):
+    # print_dummy_query()
+
     driver = GraphDatabase.driver("bolt://localhost:7687", auth=(user, password))
+    driver = _ProfileDriver(STATS, driver, profile)
 
     # getting all domains takes a bit, but still reasonable | about 47 seconds for 620,076 domains
 
+    if create_indexes:
+        # prepare indexes
+        driver.execute_query("CREATE INDEX ip_lookup IF NOT EXISTS FOR (x:IP) ON (x.ip)")
+        driver.execute_query("CREATE INDEX domain_lookup IF NOT EXISTS FOR (x:DOMAIN) ON (x.domain)")
+
     CLUSTER = None
+    LIMIT = None
     # CLUSTER = 4283  # Test Cluster (8409 domains)
-    DOMAINS = set(get_domains(driver, CLUSTER))
+    LIMIT = 10000  # Test Limit
+    DOMAINS = set(get_domains(driver, CLUSTER, LIMIT))
     print(f"Fetched {len(DOMAINS)} domains")
 
     STATS.start(len(DOMAINS))
@@ -170,4 +302,4 @@ def main(parallelize):
 
 
 if __name__ == "__main__":
-    main(True)
+    main(False, True, True)
