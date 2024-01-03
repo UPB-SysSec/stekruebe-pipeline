@@ -54,7 +54,7 @@ class _Stats:
     def done_targets(self, n):
         self.targets += n
 
-    def performed_query(self, result: Result):
+    def performed_query(self, result: Result = None):
         callsite = inspect.stack()[2]
         callsite_str = f"{callsite.function}({callsite.lineno})"
         if callsite_str not in self.db:
@@ -275,7 +275,8 @@ def main(parallelize, create_indexes=True, profile=True):
     # print_dummy_query()
 
     driver = GraphDatabase.driver("bolt://localhost:7687", auth=(user, password))
-    driver = _ProfileDriver(STATS, driver, profile)
+    if profile:
+        driver = _ProfileDriver(STATS, driver, profile)
 
     # getting all domains takes a bit, but still reasonable | about 47 seconds for 620,076 domains
 
@@ -287,14 +288,17 @@ def main(parallelize, create_indexes=True, profile=True):
     CLUSTER = None
     LIMIT = None
     # CLUSTER = 4283  # Test Cluster (8409 domains)
-    LIMIT = 10000  # Test Limit
+    # LIMIT = 10000  # Test Limit
     DOMAINS = set(get_domains(driver, CLUSTER, LIMIT))
     print(f"Fetched {len(DOMAINS)} domains")
 
     STATS.start(len(DOMAINS))
 
     if parallelize:
-        with ThreadPool() as pool:
+        num_threads = None
+        if isinstance(parallelize, int):
+            num_threads = parallelize
+        with ThreadPool(processes=num_threads) as pool:
             pool.map(lambda d: d.evaluate(driver), DOMAINS)
     else:
         for domain in DOMAINS:
@@ -302,4 +306,4 @@ def main(parallelize, create_indexes=True, profile=True):
 
 
 if __name__ == "__main__":
-    main(False, True, True)
+    main(16, True, False)

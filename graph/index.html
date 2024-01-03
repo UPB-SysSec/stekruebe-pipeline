@@ -87,6 +87,7 @@
                                 // IP
                                 if (node.id.includes(":")) {
                                     // ipv6
+                                    // backwards compatible :)
                                     return "#2BAEFF";
                                 }
                                 return "#6184D8";
@@ -96,6 +97,8 @@
                             case 3:
                                 // PREFIX_16
                                 return "#65C683";
+                            case 4:
+                                return "#2BAEFF";
 
                             default:
                                 return "black";
