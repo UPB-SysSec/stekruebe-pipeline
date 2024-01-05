@@ -162,8 +162,8 @@ class FileLineReader(Stage[list[str]]):
 
 
 class SimpleSubprocessStage(CacheableStage[list[str]]):
-    def __init__(self, name, stats, command, *args, **kwargs) -> None:
-        super().__init__(name, stats)
+    def __init__(self, name, stats, command, *args, cache_as_format: FileFormat = ..., **kwargs) -> None:
+        super().__init__(name, stats, cache_as_format=cache_as_format)
         self.command = command
         self.args = args
         self.kwargs = kwargs
@@ -181,6 +181,50 @@ class SimpleSubprocessStage(CacheableStage[list[str]]):
             self.logger.error(f"Stderr: {proc.stderr.decode()}")
             raise e
         return proc.stdout.decode().splitlines()
+
+
+class ZDNS(SimpleSubprocessStage):
+    def __init__(self, stats, *args, **kwargs) -> None:
+        super().__init__("ZDNS", stats, *args, **kwargs)
+
+    def run_stage(self, input_string_list: list[str] = None) -> list[str]:
+        start = time.time()
+        ret = super().run_stage(input_string_list)
+        end = time.time()
+        self._store_stat("zdns runtime", end - start)
+
+        start = time.time()
+        status_counts = {}
+        no_ips = 0
+        only_v4 = 0
+        only_v6 = 0
+        both = 0
+        for ln in ret:
+            item = json.loads(ln)
+            status = item.get("status", "N/A")
+            if status not in status_counts:
+                status_counts[status] = 0
+            status_counts[status] += 1
+            if status == "NOERROR":
+                data = item.get("data", {})
+                if data.get("ipv4_addresses"):
+                    if data.get("ipv6_addresses"):
+                        both += 1
+                    else:
+                        only_v4 += 1
+                elif data.get("ipv6_addresses"):
+                    only_v6 += 1
+                else:
+                    no_ips += 1
+        end = time.time()
+        self._store_stat("zdns postprocess runtime", end - start)
+
+        self._store_stat("status_counts", status_counts)
+        self._store_stat("no_ips", no_ips)
+        self._store_stat("only_v4", only_v4)
+        self._store_stat("only_v6", only_v6)
+        self._store_stat("both_v4_and_v6", both)
+        return ret
 
 
 class BlocklistFilter(CacheableStage[list[str]]):
@@ -380,8 +424,15 @@ def main(TRANCO_NUM=None, DRY_RUN=False):
 
     class STAGES:
         TRANCO = FileLineReader("ReadTranco", stats, FILES.TRANCO, n_lines=TRANCO_NUM)
-        ZDNS = SimpleSubprocessStage(
-            "ZDNS", stats, EXEUTABLES.ZDNS, "--iterative", "--alexa", "alookup", "--ipv4-lookup", "--ipv6-lookup"
+        ZDNS = ZDNS(
+            stats,
+            EXEUTABLES.ZDNS,
+            "--iterative",
+            "--alexa",
+            "alookup",
+            "--ipv4-lookup",
+            "--ipv6-lookup",
+            cache_as_format=FileFormat.TXT,
         )
         JQ4 = SimpleSubprocessStage("JQ4", stats, EXEUTABLES.JQ, "-r", ".data.ipv4_addresses | select(. != null) | .[]")
         JQ6 = SimpleSubprocessStage("JQ6", stats, EXEUTABLES.JQ, "-r", ".data.ipv6_addresses | select(. != null) | .[]")
