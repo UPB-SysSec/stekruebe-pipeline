@@ -1,4 +1,4 @@
 backup/
 *.log
-out/
+out*/
 tranco_*.csv
