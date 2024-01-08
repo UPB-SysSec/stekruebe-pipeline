@@ -1,3 +1,6 @@
+import abc
+import subprocess
+import tempfile
 from typing import Any
 from neo4j import GraphDatabase, Driver, Session, Result
 from enum import Enum
@@ -5,6 +8,7 @@ import time
 from dataclasses import dataclass
 import datetime
 from multiprocessing.pool import ThreadPool
+from pymongo import MongoClient
 from threading import Thread
 import inspect
 import os.path as op
@@ -181,11 +185,95 @@ class _ProfileDriver:
         return _ProfileSession(self._stats, self._driver.session(), self._profile)
 
 
-def scan(domain_from: str, addr_from: Connectable, *targed_addrs: Connectable):
-    # dummy interface for scan.py
-    # print(f"Scanning {domain_from!r} from {addr_from!r} to {len(targed_addrs)} targets")
-    STATS.done_targets(len(targed_addrs))
+class ScanVersion(Enum):
+    TLS1_2 = "12"
+    TLS1_3 = "13"
 
+class Scanner(abc.ABC):
+    @abc.abstractmethod
+    def scan(self, domain_from: str, addr_from: Connectable, *targed_addrs: Connectable, version = ScanVersion.TLS1_2):
+        pass
+
+class DummyScanner(Scanner):
+    def scan(self, domain_from: str, addr_from: Connectable, *targed_addrs: Connectable, version = ScanVersion.TLS1_2):
+        print(f"Scanning {domain_from} from {addr_from} to {len(targed_addrs)} targets on version {version.value}")
+        STATS.done_targets(len(targed_addrs))
+
+class Zgrab2Scanner(Scanner):
+    _INITIAL_TICKET_1_2_CONFIG = [
+        "./zgrab2", "tls",
+        "--min-version=0x0303", "--max-version=0x0303",
+        "--force-session-ticket",
+        "--port=443",
+        "--use-session-cache=2"
+    ]
+    _INITIAL_TICKET_1_3_CONFIG = [
+        "./zgrab2", "http", 
+        "--use-https", 
+        "--max-redirects=1", "--redirects-succeed",
+        # tls options
+        "--min-version=0x0304", "--max-version=0x0304",
+        "--port=443", 
+        "--use-session-cache=2"
+    ]
+
+    _REDIRECT_TICKET_1_2_CONFIG = [
+        "./zgrab2", "http", 
+        "--use-https", 
+        "--max-redirects=1", "--redirects-succeed",
+        # tls options
+        "--min-version=0x0303", "--max-version=0x0303",
+        "--port=443", 
+        "--use-session-cache=1"
+    ]
+    _REDIRECT_TICKET_1_3_CONFIG = [
+        "./zgrab2", "http", 
+        "--use-https", 
+        "--max-redirects=1", "--redirects-succeed"
+        # tls options
+        "--min-version=0x0304", "--max-version=0x0304",
+        "--port=443", 
+        "--use-session-cache=1"
+    ]
+    def __init__(self) -> None:
+        # TODO: MongoClient here?
+        pass
+
+    def scan(self, domain_from: str, addr_from: Connectable, *target_addrs: Connectable, version):
+        if version == ScanVersion.TLS1_2:
+            self._scan_by_config(domain_from, addr_from, *target_addrs, initial_config=self._INITIAL_TICKET_1_2_CONFIG, redirect_config=self._REDIRECT_TICKET_1_2_CONFIG)
+            # potentially version specific pre-database processing here
+        elif version == ScanVersion.TLS1_3:
+            self._scan_by_config(domain_from, addr_from, *target_addrs, initial_config=self._INITIAL_TICKET_1_3_CONFIG, redirect_config=self._REDIRECT_TICKET_1_3_CONFIG)
+        else:
+            raise ValueError("Unknown version")
+        # TODO: Add output to database
+        STATS.done_targets(len(target_addrs))
+
+    def _scan_by_config(self, domain_from: str, addr_from: Connectable, *target_addrs: Connectable, initial_config: list, redirect_config: list):
+        # get ticket for domain_from
+        input_string = f"{addr_from.ip},{domain_from},\n".encode()
+        with tempfile.TemporaryDirectory() as cache_dir:
+            initial = subprocess.run(
+                initial_config + ["--session-cache-dir", cache_dir],
+                input = input_string,
+                capture_output=True,
+            )
+
+            # TODO: It is unlikely for the first scan to fail after our preprocessing, but we could parse the output to be sure
+            # I think its fine to just assume it worked, because zgrab2 fails gracefully
+
+            input_string = ''.join([f"{target_addr.ip},{domain_from}\n" for target_addr in target_addrs]).encode()
+            print(target_addrs[0].ip)
+            redirect = subprocess.run(
+                redirect_config + ["--session-cache-dir", cache_dir],
+                input = input_string,
+                capture_output=True,
+            )
+            # newline separated json objects
+            return redirect
+
+scanner = DummyScanner()
 
 class IPType(Enum):
     V4 = "IPV4"
@@ -219,10 +307,10 @@ class Domain:
             )
             local_targets = []
             for target_ips in _targets:
-                target_ips = target_ips[0]
+                target_ips = target_ips[0].get("ip")    # get the ip from the Neo4j result
                 local_targets.append(Connectable(target_ips, 443))
 
-        scan(self.domain, source_ip, *local_targets)
+        scanner.scan(self.domain, Connectable(source_ip, 443), *local_targets, version=ScanVersion.TLS1_2)
 
     def _evaluate(self, driver: Driver, tfrom: IPType):
         if not isinstance(tfrom, IPType):
@@ -274,22 +362,22 @@ def print_dummy_query():
 def main(parallelize, create_indexes=True, profile=True):
     # print_dummy_query()
 
-    driver = GraphDatabase.driver("bolt://localhost:7687", auth=(user, password))
+    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=(user, password))
     if profile:
-        driver = _ProfileDriver(STATS, driver, profile)
+        neo4j_driver = _ProfileDriver(STATS, neo4j_driver, profile)
 
     # getting all domains takes a bit, but still reasonable | about 47 seconds for 620,076 domains
 
     if create_indexes:
         # prepare indexes
-        driver.execute_query("CREATE INDEX ip_lookup IF NOT EXISTS FOR (x:IP) ON (x.ip)")
-        driver.execute_query("CREATE INDEX domain_lookup IF NOT EXISTS FOR (x:DOMAIN) ON (x.domain)")
-
-    CLUSTER = None
-    LIMIT = None
-    # CLUSTER = 4283  # Test Cluster (8409 domains)
-    # LIMIT = 10000  # Test Limit
-    DOMAINS = set(get_domains(driver, CLUSTER, LIMIT))
+        neo4j_driver.execute_query("CREATE INDEX ip_lookup IF NOT EXISTS FOR (x:IP) ON (x.ip)")
+        neo4j_driver.execute_query("CREATE INDEX domain_lookup IF NOT EXISTS FOR (x:DOMAIN) ON (x.domain)")
+    
+    # CLUSTER = None
+    # LIMIT = None
+    CLUSTER = 4283  # Test Cluster (8409 domains)
+    LIMIT = 10000  # Test Limit
+    DOMAINS = set(get_domains(neo4j_driver, CLUSTER, LIMIT))
     print(f"Fetched {len(DOMAINS)} domains")
 
     STATS.start(len(DOMAINS))
@@ -299,11 +387,11 @@ def main(parallelize, create_indexes=True, profile=True):
         if isinstance(parallelize, int):
             num_threads = parallelize
         with ThreadPool(processes=num_threads) as pool:
-            pool.map(lambda d: d.evaluate(driver), DOMAINS)
+            pool.map(lambda d: d.evaluate(neo4j_driver), DOMAINS)
     else:
         for domain in DOMAINS:
-            domain.evaluate(driver)
+            domain.evaluate(neo4j_driver)
 
 
 if __name__ == "__main__":
-    main(16, True, False)
+    main(1, True, False)
