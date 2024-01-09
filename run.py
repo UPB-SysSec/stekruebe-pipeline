@@ -359,32 +359,41 @@ class PostProcessZGrab(Stage[None]):
             total = f_in.tell()
             f_in.seek(0)
 
-            tickets = {}
+            zgrab_results = {}
             handled = set()
 
             while ln := f_in.readline():
                 item = json.loads(ln)
                 ip = item["ip"]
                 domain = item["domain"]
+
+                zgrab_result = {}
                 try:
-                    ticket = item["data"]["tls"]["result"]["handshake_log"]["session_ticket"]
+                    zgrab_result["ticket"] = item["data"]["tls"]["result"]["handshake_log"]["session_ticket"]
                 except KeyError:
-                    ticket = None
+                    zgrab_result["ticket"] = None
+                try:
+                    zgrab_result["status"] = item["data"]["tls"]["status"]
+                except KeyError:
+                    zgrab_result["status"] = None
+
                 key = (ip, domain)
-                if key not in tickets:
+                if key not in zgrab_results:
                     assert key not in handled
-                    tickets[key] = []
-                tickets[key].append(ticket)
-                if len(tickets[key]) >= self.connections_per_host:
-                    json.dump({"ip": ip, "domain": domain, "tickets": tickets[key]}, f_out)
+                    zgrab_results[key] = []
+
+                zgrab_results[key].append(zgrab_result)
+
+                if len(zgrab_results[key]) >= self.connections_per_host:
+                    json.dump({"ip": ip, "domain": domain, "results": zgrab_results[key]}, f_out)
                     f_out.write("\n")
-                    del tickets[key]
+                    del zgrab_results[key]
                     handled.add(key)
                     if len(handled) % 10_000 == 0:
                         print(
-                            f"Handled: {len(handled):7d} ({100*f_in.tell()/total:6.2f}%) | Currently open: {len(tickets):7d}"
+                            f"Handled: {len(handled):7d} ({100*f_in.tell()/total:6.2f}%) | Currently open: {len(zgrab_results):7d}"
                         )
-            assert not tickets, tickets
+            assert not zgrab_results, zgrab_results
             return len(handled)
 
 
