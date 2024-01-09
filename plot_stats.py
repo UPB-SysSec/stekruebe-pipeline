@@ -10,8 +10,12 @@ import inspect
 
 OUTDIR = functools.partial(op.join, "out_python")
 TRANCO = "tranco_7X8NX.csv"
-OUTDIR = functools.partial(op.join, "out")
+# OUTDIR = functools.partial(op.join, "out")
 # TRANCO = "tranco_LYK84.csv"
+
+_ERROR_NODES = False
+_FIX_X = True
+_EDGE_SOURCE_COLOR = False
 
 
 class COLORS:
@@ -259,27 +263,49 @@ with open(OUTDIR("7_merged_zgrab.json")) as f:
 
 print("Loading Nodes")
 nodes = []
-for i, p in enumerate(PHASES):
-    setattr(p, "_err_node", Node(f"_err{i}", "rgba(0,0,0,0)", 0, True))
+for pi, p in enumerate(PHASES):
+    if _ERROR_NODES:
+        setattr(p, "_err_node", Node(f"_err{pi}", "rgba(0,0,0,0)", 0, True))
     phase_nodes = inspect.getmembers(p, lambda x: isinstance(x, Node))
     nodes.extend(map(lambda x: x[1], phase_nodes))
+    if _FIX_X:
+        # print()
+        # print(i, p)
+        for ni, (_, node) in enumerate(phase_nodes):
+            node.x = pi / (len(PHASES) - 1)
+            if node.y is None:
+                if node.is_err:
+                    node.y = 0.8
+                else:
+                    node.y = 0.1
+            # print(i, p, node.name, node.x)
 
 print("Creating Edges")
 edges: dict[tuple[Node, Node], Edge] = {}
 
+# patch error flows
 for domain in domains.values():
     has_error = False
-    for phasel, phaser in list(zip(PHASES, PHASES[1:])):
+    for phaser in PHASES:
         if has_error:
-            domain.phase_associations[phaser] = phaser._err_node
-        node_r = domain.phase_associations[phaser]
-        if node_r.is_err:
-            # entering error state - forward into generic error states afterwards
-            has_error = True
+            if _ERROR_NODES:
+                domain.phase_associations[phaser] = phaser._err_node
+            elif phaser in domain.phase_associations:
+                assert domain.phase_associations[phaser].is_err
+                del domain.phase_associations[phaser]
+        else:
+            node_r = domain.phase_associations[phaser]
+            if node_r.is_err:
+                # entering error state - forward into generic error states afterwards
+                has_error = True
 
+# create edges
 for domain in domains.values():
     for phasel, phaser in zip(PHASES, PHASES[1:]):
         node_l = domain.phase_associations[phasel]
+        if phaser not in domain.phase_associations:
+            assert node_l.is_err
+            break
         node_r = domain.phase_associations[phaser]
         if (node_l, node_r) not in edges:
             edges[(node_l, node_r)] = Edge(0)
@@ -289,21 +315,19 @@ for domain in domains.values():
         node_r.actual_value_in += 1
         edge.value += 1
 
-# for phasel, phaser in zip(PHASES, PHASES[1:]):
-#     lerr = phasel._err_node
-#     rerr = phaser._err_node
-#     edges[(lerr, rerr)] = Edge(lerr.actual_value_in)
-#     lerr.actual_value_out += lerr.actual_value_in
-#     rerr.actual_value_in += lerr.actual_value_in
-
+# set edge colors
 for (a, b), edge in edges.items():
-    edge.color = a.color.replace(", 1)", ", 0.5)")
+    if _EDGE_SOURCE_COLOR:
+        color = a.color
+    else:
+        color = b.color
+    edge.color = color.replace(", 1)", ", 0.5)")
 
 print("Rendering")
 fig = go.Figure(
     data=[
         go.Sankey(
-            # arrangement="fixed",
+            arrangement="snap",
             # snap, perpendicular, freeform, fixed
             node=dict(
                 pad=15,
