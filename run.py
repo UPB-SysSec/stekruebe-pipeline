@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from enum import Enum, auto
 from itertools import chain
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from random import shuffle
 
 
 class FileFormat(Enum):
@@ -61,7 +62,7 @@ class _Stats:
 
     def store(self, stage_name: str, name: str, data: Any):
         with open(self.filename, "a", newline="") as f:
-            csv.writer(f).writerow([stage_name, name, data])
+            csv.writer(f).writerow([stage_name, name, json.dumps(data)])
 
 
 class Stage(ABC, Generic[OUTPUTS]):
@@ -258,7 +259,10 @@ class BlocklistFilter(CacheableStage[list[str]]):
         self._store_stat("blocklist_filter_time", end - start)
 
     def run_stage(self, ip_addresses: list[str]):
-        return list(self._run_stage(ip_addresses))
+        ret = self._run_stage(ip_addresses)
+        ret = list(set(ret))
+        shuffle(ret)
+        return ret
 
 
 class MergeUniq(CacheableStage[list[str]]):
@@ -358,7 +362,7 @@ class PostProcessZGrab(Stage[None]):
             tickets = {}
             handled = set()
 
-            for ln in f_in:
+            while ln := f_in.readline():
                 item = json.loads(ln)
                 ip = item["ip"]
                 domain = item["domain"]
@@ -484,7 +488,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False):
     IPv4s = STAGES.BLOCKLIST4(IPv4s, cache_file=FILES.FILTERED_4_IPLIST)
     IPv6s = STAGES.BLOCKLIST6(IPv6s, cache_file=FILES.FILTERED_6_IPLIST)
     IPv4s = STAGES.ZMAP4(cache_file=FILES.HTTPS_4_IPLIST, dry_run=DRY_RUN)
-    IPv4s = STAGES.ZMAP6(cache_file=FILES.HTTPS_6_IPLIST, dry_run=DRY_RUN)
+    IPv6s = STAGES.ZMAP6(cache_file=FILES.HTTPS_6_IPLIST, dry_run=DRY_RUN)
     IPs = STAGES.MERGE_UNIQ(IPv4s, IPv6s, cache_file=FILES.MERGED_IP_LIST)
     del IPv4s, IPv6s
     ip_and_hosts = STAGES.MAP_IPS_TO_DOMAINS(resolved_hosts, IPs, cache_file=FILES.MERGED_HOST_LIST, dry_run=DRY_RUN)
@@ -498,4 +502,4 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)-26s %(message)s")
     # main(10, False)
     # main(None, True)
-    main(1000)
+    main()
