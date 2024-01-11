@@ -1,5 +1,7 @@
 import abc
+import json
 import subprocess
+import sys
 import tempfile
 from typing import Any
 from neo4j import GraphDatabase, Driver, Session, Result
@@ -11,11 +13,11 @@ from multiprocessing.pool import ThreadPool
 from pymongo import MongoClient
 from threading import Thread
 import inspect
-import os.path as op
 
 with open("neo4j/credentials") as f:
-    user, password = f.read().strip().split(":")
-
+    neo4j_user, neo4j_password = f.read().strip().split(":")
+with open("mongo/credentials") as f:
+    mongo_user, mongo_password = f.read().strip().split(":")
 
 @dataclass(frozen=True)
 class Connectable:
@@ -235,18 +237,21 @@ class Zgrab2Scanner(Scanner):
         "--port=443", 
         "--use-session-cache=1"
     ]
-    def __init__(self) -> None:
-        # TODO: MongoClient here?
-        pass
+    def __init__(self, mongo_driver, db_name="test", collection_name=f"ticket_redirection_{str(datetime.datetime.now())}") -> None:
+        self.mongo_driver = mongo_driver
+        self.mongo_db = mongo_driver[db_name]
+        self.mongo_collection = self.mongo_db[collection_name]
+        self.mongo_collection.insert_one({"test": "test"})
 
     def scan(self, domain_from: str, addr_from: Connectable, *target_addrs: Connectable, version):
         if version == ScanVersion.TLS1_2:
-            self._scan_by_config(domain_from, addr_from, *target_addrs, initial_config=self._INITIAL_TICKET_1_2_CONFIG, redirect_config=self._REDIRECT_TICKET_1_2_CONFIG)
+            res = self._scan_by_config(domain_from, addr_from, *target_addrs, initial_config=self._INITIAL_TICKET_1_2_CONFIG, redirect_config=self._REDIRECT_TICKET_1_2_CONFIG)
             # potentially version specific pre-database processing here
         elif version == ScanVersion.TLS1_3:
-            self._scan_by_config(domain_from, addr_from, *target_addrs, initial_config=self._INITIAL_TICKET_1_3_CONFIG, redirect_config=self._REDIRECT_TICKET_1_3_CONFIG)
+            res = self._scan_by_config(domain_from, addr_from, *target_addrs, initial_config=self._INITIAL_TICKET_1_3_CONFIG, redirect_config=self._REDIRECT_TICKET_1_3_CONFIG)
         else:
             raise ValueError("Unknown version")
+        insert = self.mongo_collection.insert_one(res)
         # TODO: Add output to database
         STATS.done_targets(len(target_addrs))
 
@@ -259,19 +264,22 @@ class Zgrab2Scanner(Scanner):
                 input = input_string,
                 capture_output=True,
             )
+            result = dict()
+            result["initial"] = json.loads(initial.stdout)
 
             # TODO: It is unlikely for the first scan to fail after our preprocessing, but we could parse the output to be sure
             # I think its fine to just assume it worked, because zgrab2 fails gracefully
 
             input_string = ''.join([f"{target_addr.ip},{domain_from}\n" for target_addr in target_addrs]).encode()
-            print(target_addrs[0].ip)
             redirect = subprocess.run(
                 redirect_config + ["--session-cache-dir", cache_dir],
                 input = input_string,
                 capture_output=True,
             )
+            redirect_results = [json.loads(res) for res in redirect.stdout.splitlines()]
+            result["redirect"] = redirect_results
             # newline separated json objects
-            return redirect
+            return result
 
 scanner = DummyScanner()
 
@@ -296,7 +304,7 @@ class Domain:
     def __init__(self, domain):
         self.domain = domain
 
-    def _evaluate_from(self, driver: Driver, source_ip: str):
+    def _evaluate_from(self, driver: Driver, scanner: Scanner, source_ip: str):
         with driver.session() as session:
             _targets = session.run(
                 _BASE_QUERY.format(ip_target_type=IPType.V4.value)
@@ -312,7 +320,7 @@ class Domain:
 
         scanner.scan(self.domain, Connectable(source_ip, 443), *local_targets, version=ScanVersion.TLS1_2)
 
-    def _evaluate(self, driver: Driver, tfrom: IPType):
+    def _evaluate(self, driver: Driver, scanner: Scanner, tfrom: IPType):
         if not isinstance(tfrom, IPType):
             raise TypeError("tfrom must be IPType")
 
@@ -327,11 +335,11 @@ class Domain:
             )
 
             for source_ip in ips:
-                self._evaluate_from(driver, source_ip[0])
+                self._evaluate_from(driver, scanner, source_ip[0])
 
-    def evaluate(self, driver: Driver):
+    def evaluate(self, driver: Driver, scanner: Scanner):
         for tfrom in IPType:
-            self._evaluate(driver, tfrom)
+            self._evaluate(driver, scanner, tfrom)
 
         STATS.done_domain()
 
@@ -362,7 +370,7 @@ def print_dummy_query():
 def main(parallelize, create_indexes=True, profile=True):
     # print_dummy_query()
 
-    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=(user, password))
+    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=(neo4j_user, neo4j_password))
     if profile:
         neo4j_driver = _ProfileDriver(STATS, neo4j_driver, profile)
 
@@ -372,6 +380,12 @@ def main(parallelize, create_indexes=True, profile=True):
         # prepare indexes
         neo4j_driver.execute_query("CREATE INDEX ip_lookup IF NOT EXISTS FOR (x:IP) ON (x.ip)")
         neo4j_driver.execute_query("CREATE INDEX domain_lookup IF NOT EXISTS FOR (x:DOMAIN) ON (x.domain)")
+    
+    mongo_url = f"mongodb://{mongo_user}:{mongo_password}@snhebrok-eval.cs.upb.de:27018/?authSource=admin&directConnection=true&tls=true"
+    print(f"Connecting to {mongo_url=}")
+    mongo_driver = MongoClient(mongo_url)
+    mongo_driver.server_info()
+    scanner = Zgrab2Scanner(mongo_driver=mongo_driver)
     
     # CLUSTER = None
     # LIMIT = None
@@ -387,11 +401,11 @@ def main(parallelize, create_indexes=True, profile=True):
         if isinstance(parallelize, int):
             num_threads = parallelize
         with ThreadPool(processes=num_threads) as pool:
-            pool.map(lambda d: d.evaluate(neo4j_driver), DOMAINS)
+            pool.map(lambda d: d.evaluate(neo4j_driver, scanner), DOMAINS)
     else:
         for domain in DOMAINS:
-            domain.evaluate(neo4j_driver)
+            domain.evaluate(neo4j_driver, scanner)
 
 
 if __name__ == "__main__":
-    main(1, True, False)
+    main(16, True, False)
