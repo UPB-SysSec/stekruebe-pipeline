@@ -185,8 +185,8 @@ class SimpleSubprocessStage(CacheableStage[list[str]]):
 
 
 class ZDNS(SimpleSubprocessStage):
-    def __init__(self, stats, *args, **kwargs) -> None:
-        super().__init__("ZDNS", stats, *args, **kwargs)
+    def __init__(self, stats, *args, name_overwrite="ZDNS", **kwargs) -> None:
+        super().__init__(name_overwrite, stats, *args, **kwargs)
 
     def run_stage(self, input_string_list: list[str] = None) -> list[str]:
         start = time.time()
@@ -440,7 +440,6 @@ def main(TRANCO_NUM=None, DRY_RUN=False):
         ZDNS = ZDNS(
             stats,
             EXEUTABLES.ZDNS,
-            "--iterative",
             "--alexa",
             "alookup",
             "--ipv4-lookup",
@@ -507,8 +506,52 @@ def main(TRANCO_NUM=None, DRY_RUN=False):
     STAGES.PP_ZGRAB(FILES.ZGRAB_OUT, FILES.ZGRAB_MERGED_OUT)
 
 
+def test_zdns():
+    if not op.isdir("out_test"):
+        os.mkdir("out_test")
+    stats = _Stats("out_test/stats.csv")
+
+    class EXEUTABLES:
+        ZDNS = "/root/zdns/zdns"
+
+    class FILES:
+        TRANCO = "tranco_7X8NX.csv"
+
+    tranco = FileLineReader("ReadTranco", stats, FILES.TRANCO, n_lines=100_000)()
+
+    _DEFAULT_ARGS = (
+        "--alexa",
+        "alookup",
+        "--ipv4-lookup",
+        "--ipv6-lookup",
+    )
+
+    for name, extra_args in {
+        "normal": [],
+        "normal_t30": ["--timeout", "30"],
+        "normal_t60": ["--timeout", "60"],
+        "iterative": ["--iterative"],
+        "iterative_it10": ["--iterative", "--iteration-timeout", "10"],
+        "iterative_it20": ["--iterative", "--iteration-timeout", "20"],
+        "iterative_t30": ["--iterative", "--timeout", "30"],
+        "iterative_t30_it10": ["--iterative", "--timeout", "30", "--iteration-timeout", "10"],
+        "iterative_t30_it20": ["--iterative", "--timeout", "30", "--iteration-timeout", "20"],
+        "iterative_t60": ["--iterative", "--timeout", "60"],
+        "iterative_t60_it10": ["--iterative", "--timeout", "60", "--iteration-timeout", "10"],
+        "iterative_t60_it20": ["--iterative", "--timeout", "60", "--iteration-timeout", "20"],
+    }.items():
+        try:
+            ZDNS(
+                stats, EXEUTABLES.ZDNS, *_DEFAULT_ARGS, *extra_args, cache_as_format=FileFormat.TXT, name_overwrite=name
+            )(input_string_list=tranco, cache_file=f"out_test/{name}.json")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed for {name}")
+            raise e
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)-26s %(message)s")
     # main(10, False)
     # main(None, True)
     main()
+    # test_zdns()
