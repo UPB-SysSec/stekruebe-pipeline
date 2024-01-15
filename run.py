@@ -407,7 +407,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False):
         ZDNS = "/root/zdns/zdns"
         ZMAP4 = "/root/zmap/src/zmap"
         ZMAP6 = "/root/zmapv6/src/zmap"
-        ZGRAB = "/root/zgrab2/zgrab2"
+        ZGRAB = "/data/cdn_ticket/zgrab2"
 
     if not op.isdir("out"):
         os.mkdir("out")
@@ -480,8 +480,9 @@ def main(TRANCO_NUM=None, DRY_RUN=False):
             "Zgrab",
             stats,
             EXEUTABLES.ZGRAB,
-            "tls",
-            "--session-ticket",
+            "multiple",
+            "-c",
+            "get-ticket-for-grouping.ini",
             f"--connections-per-host={CONST.ZGRAB_CONNECTIONS_PER_HOST}",
             "-o",
             FILES.ZGRAB_OUT,

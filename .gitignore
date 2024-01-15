@@ -2,3 +2,5 @@ backup/
 *.log
 out*/
 tranco_*.csv
+session_cache/
+zgrab2

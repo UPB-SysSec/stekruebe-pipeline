@@ -8,7 +8,7 @@ import json
 import types
 import inspect
 
-OUTDIR = functools.partial(op.join, "out_python")
+OUTDIR = functools.partial(op.join, "out")
 TRANCO = "tranco_7X8NX.csv"
 # OUTDIR = functools.partial(op.join, "out")
 # TRANCO = "tranco_LYK84.csv"
