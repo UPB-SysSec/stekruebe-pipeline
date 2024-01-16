@@ -398,6 +398,7 @@ class PostProcessZGrab(Stage[None]):
                 domain = item["domain"]
 
                 zgrab_result = {}
+                # TODO 1.3/https, notify Tim
                 try:
                     zgrab_result["ticket"] = item["data"]["tls"]["result"]["handshake_log"]["session_ticket"]
                 except KeyError:
