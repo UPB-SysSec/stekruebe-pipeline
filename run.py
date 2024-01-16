@@ -6,12 +6,16 @@ import logging
 import os
 import os.path as op
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
-from enum import Enum, auto
+from enum import Enum
 from itertools import chain
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from random import shuffle
+from select import select
+from typing import Any, Generic, TypeVar
+
+from json_filter import Filter as JsonFilter
 
 
 class FileFormat(Enum):
@@ -119,7 +123,7 @@ class CacheableStage(Stage[OUTPUTS]):
             format = FileFormat.from_filename(output_file)
         else:
             format = self.cache_as_format
-        format.parse_from_file(output_file)
+        return format.parse_from_file(output_file)
 
     def __call__(self, *args, cache_file, cache_write=True, cache_load=True, dry_run=False, **kwargs):
         if cache_file and op.isfile(cache_file):
@@ -310,6 +314,8 @@ class ZgrabRunner(Stage[int]):
         name,
         stats: _Stats,
         executable: str,
+        output_file: str,
+        out_filter: JsonFilter,
         *args,
     ) -> None:
         super().__init__(name, stats)
@@ -317,30 +323,54 @@ class ZgrabRunner(Stage[int]):
         self.args = args
 
         self.connections_per_host = 1
-        self.output_file = None
+        self.out_filter = out_filter
+        self.output_file = output_file
         for arg in self.args:
             if arg.startswith("--connections-per-host="):
                 self.connections_per_host = int(arg.split("=")[1])
-            elif arg == "-o":
-                self.output_file = self.args[self.args.index(arg) + 1]
-            elif arg.startswith("--output-file="):
-                self.output_file = arg.split("=")[1]
+
+    def _send_targets(self, proc: subprocess.Popen, ip_and_hosts: list[tuple[str, str]]):
+        for ip, host in ip_and_hosts:
+            proc.stdin.write(f"{ip},{host}\n".encode())
+        proc.stdin.flush()
+        proc.stdin.close()
+        self.logger.info(f"Sent {len(ip_and_hosts)} targets to zgrab")
 
     def run_stage(self, ip_and_hosts: list[tuple[str, str]]) -> int:
         if op.isfile(self.output_file):
             self.logger.warning(f"Output file {self.output_file!r} already exists. Skipping.")
             return -1
 
-        proc = subprocess.run(
-            [self.executable, *self.args],
-            input="\n".join(f"{ip},{host}" for ip, host in ip_and_hosts).encode(),
-            stderr=subprocess.PIPE,
-        )
-        proc.check_returncode()
-        status_line = proc.stderr.decode().strip().split("\n")[-1]
+        total = 0
+        stderr = b""
+        with (
+            open(self.output_file, "w") if self.output_file else open(os.devnull, "w") as fo,
+            subprocess.Popen(
+                [self.executable, *self.args],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ) as proc,
+        ):
+            inputthread = threading.Thread(target=self._send_targets, args=(proc, ip_and_hosts), daemon=True)
+            inputthread.start()
+            while returncode := proc.poll() is None:
+                # _, ready, _ = select([], [proc.stdout, proc.stderr], [])
+                for line in proc.stdout:
+                    total += 1
+                    item = json.loads(line.decode().strip())
+                    item = self.out_filter(item)
+                    if item:
+                        json.dump(item, fo)
+                        fo.write("\n")
+
+            stderr += proc.stderr.read()
+
+        if returncode:
+            raise subprocess.CalledProcessError(self.returncode, self.args, self.stdout, self.stderr)
+        status_line = stderr.decode().strip().split("\n")[-1]
         status = json.loads(status_line)
         self._store_stat("zgrab_status", status)
-        total = status["statuses"]["tls"]["successes"] + status["statuses"]["tls"]["failures"]
         return total / self.connections_per_host
 
 
@@ -435,6 +465,12 @@ def main(TRANCO_NUM=None, DRY_RUN=False):
 
     stats = _Stats("out/stats.csv")
 
+    ZGRAB_FILTER = JsonFilter(
+        "data.http.result.*",
+        "!data.http.result.response.request.tls_log",
+        "*.handshake_log.server_certificates.*.parsed",
+    )
+
     class STAGES:
         TRANCO = FileLineReader("ReadTranco", stats, FILES.TRANCO, n_lines=TRANCO_NUM)
         ZDNS = ZDNS(
@@ -480,12 +516,12 @@ def main(TRANCO_NUM=None, DRY_RUN=False):
             "Zgrab",
             stats,
             EXEUTABLES.ZGRAB,
+            FILES.ZGRAB_OUT,
+            ZGRAB_FILTER,
             "multiple",
             "-c",
             "get-ticket-for-grouping.ini",
             f"--connections-per-host={CONST.ZGRAB_CONNECTIONS_PER_HOST}",
-            "-o",
-            FILES.ZGRAB_OUT,
         )
         PP_ZGRAB = PostProcessZGrab(stats, CONST.ZGRAB_CONNECTIONS_PER_HOST)
 
