@@ -5,3 +5,5 @@ tranco_*.csv
 session_cache/
 zgrab2
 test.json
+__pycache__
+*.pyc
