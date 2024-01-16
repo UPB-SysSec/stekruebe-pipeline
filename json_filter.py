@@ -227,13 +227,26 @@ def _test_real():
     )
     filter = Filter(*PATHS_TO_FILTER)
 
-    import json
+    import json, time
 
     with open("test.json") as f:
         obj = json.load(f)
 
     print(len(str(obj)))
+    start = time.time()
     filtered = filter.apply(obj)
+    diff = time.time() - start
+    print(diff)
+    # performance target
+    PERFORMANCE_TARGET = 1 / 3000  # 3k items per second
+    if diff > PERFORMANCE_TARGET:
+        print("[!!] Warning: Filtering too slow")
+        print(f"[!!] Got  {diff:.5f}s")
+        print(f"[!!] Need {PERFORMANCE_TARGET:.5f}s")
+        print(f"[!!] Is {diff / PERFORMANCE_TARGET:.1f}x too slow")
+        import cProfile
+
+        cProfile.runctx("filter.apply(obj)", globals(), locals(), filename="/tmp/filter.prof")
     print(len(str(filtered)))
     # print(filtered)
 
