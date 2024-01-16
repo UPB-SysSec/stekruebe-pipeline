@@ -4,16 +4,80 @@ from typing import Any, Union
 __all__ = ["Filter"]
 
 
+def DEBUG(*args, **kwargs):
+    pass
+
+
+# DEBUG = print
+
+
+def cached__getitem(func):
+    cache = {}
+
+    def wrapper(obj, idx):
+        if isinstance(idx, slice):
+            cache_key = idx.start, idx.stop, idx.step
+        else:
+            cache_key = idx
+        cache_key = (obj, cache_key)
+        if cache_key not in cache:
+            cache[cache_key] = func(obj, idx)
+        return cache[cache_key]
+
+    return wrapper
+
+
+class JsonPath:
+    def __init__(self, path: str = None):
+        if isinstance(path, str):
+            if path == "":
+                self.items = ()
+            else:
+                self.items = tuple(path.split("."))
+        elif isinstance(path, (tuple, list)):
+            self.items = tuple(path)
+        elif path is None:
+            self.items = ()
+        else:
+            raise TypeError(f"Invalid path type {type(path)}")
+
+    @property
+    def isEmpty(self):
+        return not self.items
+
+    def join(self, other):
+        return JsonPath(self.items + (other,))
+
+    def __truediv__(self, other):
+        return self.join(other)
+
+    @cached__getitem
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return JsonPath(self.items[idx])
+        elif isinstance(idx, int):
+            return self.items[idx]
+        else:
+            raise TypeError(f"Invalid index type {type(idx)}")
+
+    def __repr__(self) -> str:
+        return f"JsonPath({'.'.join(self.items)})"
+
+
 class JsonFilterTree:
-    def __init__(self, object, parent: "JsonFilterTree" = None, path: str = ""):
+    def __init__(self, object, parent: "JsonFilterTree" = None, path: JsonPath = ""):
+        if isinstance(path, str):
+            path = JsonPath(path)
+        self.path = path  # only used for debugging
+
         self.children: Union[dict[str, "JsonFilterTree"], list["JsonFilterTree"], Any] = None
         self.parent = parent
-        self.path = path
         self._keep = True
+
         if isinstance(object, dict):
             self.children = {}
             for k, v in object.items():
-                self.children[k] = JsonFilterTree(v, self, (path + "." if path else "") + k)
+                self.children[k] = JsonFilterTree(v, self, path / k)
         elif isinstance(object, list):
             self.children = [JsonFilterTree(v, self, path) for v in object]
         else:
@@ -24,11 +88,15 @@ class JsonFilterTree:
         return self._keep
 
     def _propagate_keep_up(self, value):
+        if self._keep == value:
+            return
         self._keep = value
         if self.parent:
             self.parent._propagate_keep_up(value)
 
     def _propagate_keep_down(self, value):
+        if self._keep == value:
+            return
         self._keep = value
         if isinstance(self.children, dict):
             for child in self.children.values():
@@ -40,41 +108,52 @@ class JsonFilterTree:
     @keep.setter
     def keep(self, value):
         assert isinstance(value, bool)
-        self._keep = value
-        # print("+" if value else "-", self.path)
+        # DEBUG("+" if value else "-", self.path)
         # propagate downwards. More specific rules should follow later on
         self._propagate_keep_down(value)
-        if value:
+        if value and self.parent:
             # only propagate True up, so that we do not lose our parent
             # False should not be propagated up, as this would always kill the root
-            self._propagate_keep_up(value)
+            self.parent._propagate_keep_up(value)
 
-    def paths(self, *, _current_prefix=None):
+    def paths(self, *, _current_prefix: JsonPath = None):
         if _current_prefix:
             yield _current_prefix
+        else:
+            _current_prefix = JsonPath()
         if isinstance(self.children, dict):
             for k, v in self.children.items():
-                _new_prefix = _current_prefix + "." + k if _current_prefix else k
+                _new_prefix = _current_prefix / k
                 yield from v.paths(_current_prefix=_new_prefix)
         elif isinstance(self.children, list):
             for v in self.children:
                 yield from v.paths(_current_prefix=_current_prefix)
 
-    def set_keep(self, path: str, value: bool):
-        if path == "":
+    def set_keep(self, pattern: JsonPath, value: bool):
+        # DEBUG(f"set_keep path={self.path} pattern={pattern} value={value}")
+        if pattern.isEmpty:
             self.keep = value
-        else:
-            if isinstance(self.children, dict):
-                if "." in path:
-                    l, r = path.split(".", 1)
-                else:
-                    l, r = path, ""
+            return
 
-                if l in self.children:
-                    self.children[l].set_keep(r, value)
-            elif isinstance(self.children, list):
-                for child in self.children:
-                    child.set_keep(path, value)
+        if isinstance(self.children, list):
+            for child in self.children:
+                child.set_keep(pattern, value)
+            return
+
+        if not isinstance(self.children, dict):
+            # native value, do not proceed
+            return
+
+        l, r = pattern[0], pattern[1:]
+
+        if l == "*":
+            for child in self.children.values():
+                child.set_keep(pattern, value)
+                child.set_keep(r, value)
+            return
+
+        if l in self.children:
+            self.children[l].set_keep(r, value)
 
     def flatten(self):
         if isinstance(self.children, dict):
@@ -93,13 +172,10 @@ class Filter:
         item_tree = JsonFilterTree(item)
         for pattern in self.filters:
             inclusion_pattern = pattern.startswith("!")
-            # print(pattern)
+            # DEBUG(pattern)
             if inclusion_pattern:
                 pattern = pattern[1:]
-                # would be nicer if we could apply the pattern directly, but then we need to handle wildcards ourselves...
-            for path in item_tree.paths():
-                if fnmatch.fnmatch(path, pattern):
-                    item_tree.set_keep(path, inclusion_pattern)
+            item_tree.set_keep(JsonPath(pattern), inclusion_pattern)
         return item_tree.flatten()
 
     def __call__(self, item):
@@ -239,14 +315,31 @@ def _test_real():
     print(diff)
     # performance target
     PERFORMANCE_TARGET = 1 / 3000  # 3k items per second
+    N = 20
     if diff > PERFORMANCE_TARGET:
-        print("[!!] Warning: Filtering too slow")
-        print(f"[!!] Got  {diff:.5f}s")
-        print(f"[!!] Need {PERFORMANCE_TARGET:.5f}s")
-        print(f"[!!] Is {diff / PERFORMANCE_TARGET:.1f}x too slow")
+        print("[ ! ] Warning: Filtering seems too slow")
+        print(f"[ ! ] Got  {diff:.5f}s")
+        print(f"[ ! ] Need {PERFORMANCE_TARGET:.5f}s")
+        print(f"[ ! ] Is {diff / PERFORMANCE_TARGET:.1f}x too slow")
+        print(f"[ ! ] Reevaluating with {N} iterations")
+        start = time.time()
+        for _ in range(N):
+            filter.apply(obj)
+        diff = (time.time() - start) / N
+
+    if diff > PERFORMANCE_TARGET:
+        print("[!!!] Warning: Filtering is too slow")
+        print(f"[!!!] Got  {diff:.5f}s")
+        print(f"[!!!] Need {PERFORMANCE_TARGET:.5f}s")
+        print(f"[!!!] Is {diff / PERFORMANCE_TARGET:.1f}x too slow")
         import cProfile
 
+        start = time.time()
         cProfile.runctx("filter.apply(obj)", globals(), locals(), filename="/tmp/filter.prof")
+        prof_diff = time.time() - start
+        print(f"Runtime during profile  {prof_diff:.5f}s")
+        PROF_PERFORMANCE_TARGET = PERFORMANCE_TARGET * (prof_diff / diff)
+        print(f"Profiled runtime target {PROF_PERFORMANCE_TARGET:.5f}s (x{prof_diff / diff:.1f})")
     print(len(str(filtered)))
     # print(filtered)
 
