@@ -363,6 +363,8 @@ class ZgrabRunner(Stage[int]):
                     if item:
                         json.dump(item, fo)
                         fo.write("\n")
+                    if total % 100_000 == 0:
+                        self.logger.info(f"Currently at {total:7d}")
 
             stderr += proc.stderr.read()
 
