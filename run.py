@@ -1,4 +1,5 @@
 # A hopefully more configurable way to run our whole pipeline
+from collections.abc import Callable, Iterable, Mapping
 import csv
 import ipaddress
 import json
@@ -8,14 +9,156 @@ import os.path as op
 import subprocess
 import threading
 import time
+import tracemalloc
+import types
+from queue import Queue, Empty
 from abc import ABC, abstractmethod
 from enum import Enum
 from itertools import chain
 from random import shuffle
-from select import select
 from typing import Any, Generic, TypeVar
+import linecache
 
 from json_filter import Filter as JsonFilter
+
+
+class MemoryMonitor(threading.Thread):
+    def __init__(self, poll_interval=60, key_type="lineno", limit=5) -> None:
+        super().__init__(name="MemoryMonitor", daemon=True)
+        self.poll_interval = poll_interval
+        self.queue = Queue()
+        self.key_type = key_type
+        self.limit = limit
+
+        self.last_stats = None
+
+    def stop(self):
+        self.queue.put(None)
+
+    def diff_prefix(self, num, negative=True):
+        if num >= 0:
+            return "+"
+        elif negative:
+            return "-"
+        else:
+            return ""
+
+    def format_bytes(self, num, diff=False):
+        for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi", "Yi"]:
+            if abs(num) < 1024.0 or unit == "Yi":
+                break
+            num /= 1024.0
+        prefix = ""
+        if diff:
+            prefix = self.diff_prefix(num)
+            num = abs(num)
+        return prefix + f"{num:.1f} {unit:2s}B".rjust(9)
+
+    def format_lineno(self, stat):
+        frame = stat.traceback[0]
+        # replace "/path/to/module/file.py" with "module/file.py"
+        filename = os.sep.join(frame.filename.split(os.sep)[-2:])
+
+        return (
+            True,
+            f"{filename}:{frame.lineno}",
+            f"{linecache.getline(frame.filename, frame.lineno).strip()}",
+        )
+
+    def format_traceback(self, stat):
+        for frame in stat.traceback[::-1]:
+            # replace "/path/to/module/file.py" with "module/file.py"
+            filename = os.sep.join(frame.filename.split(os.sep)[-2:])
+            yield f"{filename}:{frame.lineno}"
+            yield f"\t{linecache.getline(frame.filename, frame.lineno).strip()}"
+
+    def print_stat(self, top_stats):
+        print(f"Top {self.limit} {self.key_type}")
+        for index, stat in enumerate(top_stats[: self.limit], 1):
+            additional_info = ""
+            if self.key_type == "lineno":
+                additional_info = self.format_lineno(stat)
+            elif self.key_type == "traceback":
+                additional_info = self.format_traceback(stat)
+            else:
+                additional_info = f"--error no printer for key_type {self.key_type}--"
+
+            first_line_info = ""
+            further_lines = ()
+            if isinstance(additional_info, types.GeneratorType):
+                additional_info = tuple(additional_info)
+
+            if isinstance(additional_info, tuple):
+                if additional_info[0] is True:
+                    first_line_info = additional_info[1]
+                    further_lines = ("\t" + x for x in additional_info[2:])
+                else:
+                    further_lines = ("\t" + x for x in additional_info)
+            else:
+                assert isinstance(additional_info, str)
+                if "\n" not in additional_info:
+                    first_line_info = additional_info
+                else:
+                    first_line_info, *further_lines = additional_info.split("\n")
+
+            print(f"#{index:2d}: ", end="")
+            print(f"{self.format_bytes(stat.size)}", end="")
+            if isinstance(stat, tracemalloc.StatisticDiff):
+                print(f" ({self.format_bytes(stat.size_diff, True)})", end="")
+            print(f" | {stat.count:7d} occurences", end="")
+            if isinstance(stat, tracemalloc.StatisticDiff):
+                print(f" ({self.diff_prefix(stat.count_diff, False)}{stat.count_diff})", end="")
+            if first_line_info:
+                print(f" | {first_line_info}", end="")
+            print()
+
+            if further_lines:
+                print(*further_lines, sep="\n")
+
+        other = top_stats[self.limit :]
+        if other:
+            size = sum(stat.size for stat in other)
+            print(f"{len(other)} other: {self.format_bytes(size)}")
+
+        total = sum(stat.size for stat in top_stats)
+        print(f"Total allocated size: {self.format_bytes(total)}")
+
+    def snapshot(self):
+        print("Taking Memory Snapshot")
+        snapshot = tracemalloc.take_snapshot()
+        # print("Filtering Memory Snapshot")
+        # snapshot = snapshot.filter_traces(
+        #     (
+        #         tracemalloc.Filter(False, "<frozen importlib._bootstrap>"),
+        #         tracemalloc.Filter(False, "<unknown>"),
+        #     )
+        # )
+        print("Calculating Memory Statistics")
+        if self.last_stats:
+            top_stats = snapshot.compare_to(self.last_stats, self.key_type)
+            print("Sorted by biggest change")
+            self.print_stat(top_stats)
+            top_stats.sort(reverse=True, key=tracemalloc.Statistic._sort_key)
+        else:
+            top_stats = snapshot.statistics(self.key_type)
+        print("Sorted by most allocated")
+        self.print_stat(top_stats)
+
+        self.last_stats = snapshot
+
+    def run(self):
+        trace_depth = 1
+        if self.key_type == "traceback":
+            trace_depth = 4
+        tracemalloc.start(trace_depth)
+        while True:
+            try:
+                self.queue.get(timeout=self.poll_interval)
+            except Empty:
+                self.snapshot()
+            else:
+                break
+        tracemalloc.stop()
 
 
 class FileFormat(Enum):
@@ -341,6 +484,9 @@ class ZgrabRunner(Stage[int]):
             self.logger.warning(f"Output file {self.output_file!r} already exists. Skipping.")
             return -1
 
+        EXPECTED = len(ip_and_hosts) * self.connections_per_host
+        last_percent = 0
+
         total = 0
         stderr = b""
         with (
@@ -356,6 +502,7 @@ class ZgrabRunner(Stage[int]):
             inputthread.start()
             while returncode := proc.poll() is None:
                 # _, ready, _ = select([], [proc.stdout, proc.stderr], [])
+                # line = proc.stdout.readline()
                 for line in proc.stdout:
                     total += 1
                     item = json.loads(line.decode().strip())
@@ -363,8 +510,11 @@ class ZgrabRunner(Stage[int]):
                     if item:
                         json.dump(item, fo)
                         fo.write("\n")
-                    if total % 100_000 == 0:
-                        self.logger.info(f"Currently at {total:7d}")
+
+                    percent = int(100 * total / EXPECTED)
+                    if percent > last_percent:
+                        self.logger.info(f"Currently at {total:7d} ({100 * total / EXPECTED:5.2f}%)")
+                        last_percent = percent
 
             stderr += proc.stderr.read()
 
@@ -431,6 +581,9 @@ class PostProcessZGrab(Stage[None]):
 
 
 def main(TRANCO_NUM=None, DRY_RUN=False):
+    # memmonitor = MemoryMonitor()
+    # memmonitor.start()
+
     class CONST:
         IPv6SRC = "2001:638:502:28::51"
         ZGRAB_CONNECTIONS_PER_HOST = 5

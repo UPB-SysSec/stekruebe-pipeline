@@ -11,22 +11,6 @@ def DEBUG(*args, **kwargs):
 # DEBUG = print
 
 
-def cached__getitem(func):
-    cache = {}
-
-    def wrapper(obj, idx):
-        if isinstance(idx, slice):
-            cache_key = idx.start, idx.stop, idx.step
-        else:
-            cache_key = idx
-        cache_key = (obj, cache_key)
-        if cache_key not in cache:
-            cache[cache_key] = func(obj, idx)
-        return cache[cache_key]
-
-    return wrapper
-
-
 class JsonPath:
     def __init__(self, path: str = None):
         if isinstance(path, str):
@@ -51,7 +35,6 @@ class JsonPath:
     def __truediv__(self, other):
         return self.join(other)
 
-    @cached__getitem
     def __getitem__(self, idx):
         if isinstance(idx, slice):
             return JsonPath(self.items[idx])
@@ -332,14 +315,15 @@ def _test_real():
         print(f"[!!!] Got  {diff:.5f}s")
         print(f"[!!!] Need {PERFORMANCE_TARGET:.5f}s")
         print(f"[!!!] Is {diff / PERFORMANCE_TARGET:.1f}x too slow")
-        import cProfile
+        if not True:
+            import cProfile
 
-        start = time.time()
-        cProfile.runctx("filter.apply(obj)", globals(), locals(), filename="/tmp/filter.prof")
-        prof_diff = time.time() - start
-        print(f"Runtime during profile  {prof_diff:.5f}s")
-        PROF_PERFORMANCE_TARGET = PERFORMANCE_TARGET * (prof_diff / diff)
-        print(f"Profiled runtime target {PROF_PERFORMANCE_TARGET:.5f}s (x{prof_diff / diff:.1f})")
+            start = time.time()
+            cProfile.runctx("filter.apply(obj)", globals(), locals(), filename="/tmp/filter.prof")
+            prof_diff = time.time() - start
+            print(f"Runtime during profile  {prof_diff:.5f}s")
+            PROF_PERFORMANCE_TARGET = PERFORMANCE_TARGET * (prof_diff / diff)
+            print(f"Profiled runtime target {PROF_PERFORMANCE_TARGET:.5f}s (x{prof_diff / diff:.1f})")
     print(len(str(filtered)))
     # print(filtered)
 
