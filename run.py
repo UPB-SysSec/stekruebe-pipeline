@@ -17,6 +17,7 @@ from enum import Enum
 from itertools import chain
 from random import shuffle
 from typing import Any, Generic, TypeVar
+import multiprocessing
 import linecache
 
 from json_filter import Filter as JsonFilter
@@ -460,10 +461,12 @@ class ZgrabRunner(Stage[int]):
         output_file: str,
         out_filter: JsonFilter,
         *args,
+        processing_procs=8,
     ) -> None:
         super().__init__(name, stats)
         self.executable = executable
         self.args = args
+        self.processing_procs = processing_procs
 
         self.connections_per_host = 1
         self.out_filter = out_filter
@@ -485,9 +488,12 @@ class ZgrabRunner(Stage[int]):
             return -1
 
         EXPECTED = len(ip_and_hosts) * self.connections_per_host
-        last_percent = 0
+        last_ipercent = 0
+        last_t = time.time()
+        last_n = 0
 
-        total = 0
+        start = last_t
+        processed_items = 0
         stderr = b""
         with (
             open(self.output_file, "w") if self.output_file else open(os.devnull, "w") as fo,
@@ -503,18 +509,21 @@ class ZgrabRunner(Stage[int]):
             while returncode := proc.poll() is None:
                 # _, ready, _ = select([], [proc.stdout, proc.stderr], [])
                 # line = proc.stdout.readline()
-                for line in proc.stdout:
-                    total += 1
-                    item = json.loads(line.decode().strip())
-                    item = self.out_filter(item)
-                    if item:
-                        json.dump(item, fo)
+                with multiprocessing.Pool(self.processing_procs) as pool:
+                    for processed_line in pool.imap_unordered(self.out_filter.apply_str, proc.stdout):
+                        processed_items += 1
+                        fo.write(processed_line)
                         fo.write("\n")
-
-                    percent = int(100 * total / EXPECTED)
-                    if percent > last_percent:
-                        self.logger.info(f"Currently at {total:7d} ({100 * total / EXPECTED:5.2f}%)")
-                        last_percent = percent
+                        percent = 100 * processed_items / EXPECTED
+                        ipercent = int(percent)
+                        if ipercent > last_ipercent or processed_items == EXPECTED:
+                            now = time.time()
+                            self.logger.info(
+                                f"Currently at {processed_items:7d} ({percent:5.2f}%) | {processed_items/(now-start):5.2f} {(processed_items-last_n)/(now-last_t):5.2f} items/s"
+                            )
+                            last_ipercent = ipercent
+                            last_t = now
+                            last_n = processed_items
 
             stderr += proc.stderr.read()
 
@@ -523,7 +532,7 @@ class ZgrabRunner(Stage[int]):
         status_line = stderr.decode().strip().split("\n")[-1]
         status = json.loads(status_line)
         self._store_stat("zgrab_status", status)
-        return total / self.connections_per_host
+        return processed_items / self.connections_per_host
 
 
 class PostProcessZGrab(Stage[None]):

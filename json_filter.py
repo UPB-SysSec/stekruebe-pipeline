@@ -1,4 +1,4 @@
-import fnmatch
+import json
 from typing import Any, Union
 
 __all__ = ["Filter"]
@@ -99,19 +99,6 @@ class JsonFilterTree:
             # False should not be propagated up, as this would always kill the root
             self.parent._propagate_keep_up(value)
 
-    def paths(self, *, _current_prefix: JsonPath = None):
-        if _current_prefix:
-            yield _current_prefix
-        else:
-            _current_prefix = JsonPath()
-        if isinstance(self.children, dict):
-            for k, v in self.children.items():
-                _new_prefix = _current_prefix / k
-                yield from v.paths(_current_prefix=_new_prefix)
-        elif isinstance(self.children, list):
-            for v in self.children:
-                yield from v.paths(_current_prefix=_current_prefix)
-
     def set_keep(self, pattern: JsonPath, value: bool):
         # DEBUG(f"set_keep path={self.path} pattern={pattern} value={value}")
         if pattern.isEmpty:
@@ -151,7 +138,10 @@ class Filter:
     def __init__(self, *filters: str):
         self.filters = filters
 
-    def apply(self, item):
+    def apply(self, item, output_type=...):
+        if isinstance(item, str):
+            raise TypeError("Filter.apply() does not support str input; maybe use apply_str")
+
         item_tree = JsonFilterTree(item)
         for pattern in self.filters:
             inclusion_pattern = pattern.startswith("!")
@@ -160,6 +150,9 @@ class Filter:
                 pattern = pattern[1:]
             item_tree.set_keep(JsonPath(pattern), inclusion_pattern)
         return item_tree.flatten()
+
+    def apply_str(self, item: str):
+        return json.dumps(self.apply(json.loads(item)))
 
     def __call__(self, item):
         return self.apply(item)
