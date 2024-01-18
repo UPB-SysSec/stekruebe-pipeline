@@ -151,7 +151,10 @@ class Filter:
             item_tree.set_keep(JsonPath(pattern), inclusion_pattern)
         return item_tree.flatten()
 
-    def apply_str(self, item: str):
+    def apply_str_out(self, item):
+        return json.dumps(self.apply(item))
+
+    def apply_str_in_str_out(self, item: str):
         return json.dumps(self.apply(json.loads(item)))
 
     def __call__(self, item):

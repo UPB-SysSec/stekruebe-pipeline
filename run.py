@@ -477,7 +477,10 @@ class ZgrabRunner(Stage[int]):
 
     def _send_targets(self, proc: subprocess.Popen, ip_and_hosts: list[tuple[str, str]]):
         for ip, host in ip_and_hosts:
-            proc.stdin.write(f"{ip},{host}\n".encode())
+            ln = f"{ip},{host}\n"
+            if not proc.text_mode:
+                ln = ln.encode()
+            proc.stdin.write(ln)
         proc.stdin.flush()
         proc.stdin.close()
         self.logger.info(f"Sent {len(ip_and_hosts)} targets to zgrab")
@@ -495,40 +498,77 @@ class ZgrabRunner(Stage[int]):
         start = last_t
         processed_items = 0
         stderr = b""
+
+        def _print_progress():
+            nonlocal last_t, last_n, last_ipercent
+            now = time.time()
+            percent = 100 * processed_items / EXPECTED
+            ipercent = int(percent)
+            if now - last_t < 2 and last_ipercent >= ipercent:
+                self.logger.debug(
+                    f"Skipping progress update. Last update was {now - last_t:.2f}s ago at {last_ipercent}% (now {ipercent}%)"
+                )
+                # don't print too often
+                return
+            self.logger.info(
+                f"Currently at {processed_items:7d}/{EXPECTED} ({percent:5.2f}%) | {processed_items/(now-start):5.2f} {(processed_items-last_n)/(now-last_t):5.2f} items/s"
+            )
+            last_ipercent = ipercent
+            last_t = now
+            last_n = processed_items
+
         with (
             open(self.output_file, "w") if self.output_file else open(os.devnull, "w") as fo,
+            multiprocessing.Pool(self.processing_procs) as pool,
+            # create the subprocess last, if the pool is opened afterwards the subprocess does not properly closed
             subprocess.Popen(
                 [self.executable, *self.args],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                text=False,
+                # bufsize=0,
             ) as proc,
         ):
-            inputthread = threading.Thread(target=self._send_targets, args=(proc, ip_and_hosts), daemon=True)
-            inputthread.start()
-            while returncode := proc.poll() is None:
-                # _, ready, _ = select([], [proc.stdout, proc.stderr], [])
-                # line = proc.stdout.readline()
-                with multiprocessing.Pool(self.processing_procs) as pool:
-                    for processed_line in pool.imap_unordered(self.out_filter.apply_str, proc.stdout):
-                        processed_items += 1
-                        fo.write(processed_line)
-                        fo.write("\n")
-                        percent = 100 * processed_items / EXPECTED
-                        ipercent = int(percent)
-                        if ipercent > last_ipercent or processed_items == EXPECTED:
-                            now = time.time()
-                            self.logger.info(
-                                f"Currently at {processed_items:7d} ({percent:5.2f}%) | {processed_items/(now-start):5.2f} {(processed_items-last_n)/(now-last_t):5.2f} items/s"
-                            )
-                            last_ipercent = ipercent
-                            last_t = now
-                            last_n = processed_items
 
+            def _progress_thread():
+                PRINT_EVERY = 5 * 60
+                self.logger.debug(f"Starting progress monitoring thread. Printing every {PRINT_EVERY}s")
+                while processed_items < EXPECTED and proc.poll() is None:
+                    now = time.time()
+                    time_since_last_print = now - last_t
+                    if time_since_last_print > PRINT_EVERY:
+                        _print_progress()
+                        time.sleep(PRINT_EVERY)
+                    else:
+                        time.sleep(PRINT_EVERY - time_since_last_print)
+                self.logger.info(
+                    f"Finished processing {processed_items} (Expected {EXPECTED}) items; exitcode {proc.poll()}"
+                )
+
+            progress_thread = threading.Thread(target=_progress_thread, daemon=True)
+            progress_thread.start()
+
+            inputthread = threading.Thread(
+                target=self._send_targets, args=(proc, ip_and_hosts), name="ZGRAB input thread", daemon=True
+            )
+            inputthread.start()
+            while (returncode := proc.poll()) is None:
+                # line = proc.stdout.readline()
+                # for processed_line in map(self.out_filter.apply_str_in_str_out, proc.stdout):
+                for processed_line in pool.imap(self.out_filter, proc.stdout):
+                    processed_items += 1
+                    fo.write(processed_line)
+                    fo.write("\n")
+                    ipercent = int(100 * processed_items / EXPECTED)
+                    if ipercent > last_ipercent:
+                        _print_progress()
+            self.logger.info(f"Finished processing {processed_items} items; exitcode {returncode}")
             stderr += proc.stderr.read()
 
         if returncode:
             raise subprocess.CalledProcessError(self.returncode, self.args, self.stdout, self.stderr)
+        self.logger.info(f"Zgrab Output: {stderr!r}")
         status_line = stderr.decode().strip().split("\n")[-1]
         status = json.loads(status_line)
         self._store_stat("zgrab_status", status)
@@ -589,52 +629,57 @@ class PostProcessZGrab(Stage[None]):
             return len(handled)
 
 
+class CONST:
+    IPv6SRC = "2001:638:502:28::51"
+    ZGRAB_CONNECTIONS_PER_HOST = 5
+
+
+class EXEUTABLES:
+    JQ = "jq"
+    ZDNS = "/root/zdns/zdns"
+    ZMAP4 = "/root/zmap/src/zmap"
+    ZMAP6 = "/root/zmapv6/src/zmap"
+    ZGRAB = "/data/cdn_ticket/zgrab2"
+
+
+if not op.isdir("out"):
+    os.mkdir("out")
+
+
+class FILES:
+    TRANCO = "tranco_7X8NX.csv"
+    BLOCKLIST_4 = "/data/Crawling-Blacklist/blacklist.txt"
+    BLOCKLIST_6 = "/data/Crawling-Blacklist/blacklist-ipv6.txt"
+
+    RESOLVED_DOMAINS = "out/0_resolved.json"
+
+    RESOLVED_IPS4 = "out/1_resolved_v4.ips"
+    RESOLVED_IPS6 = "out/1_resolved_v6.ips"
+
+    FILTERED_4_IPLIST = "out/2_resolved_filtered_v4.ips"
+    FILTERED_6_IPLIST = "out/2_resolved_filtered_v6.ips"
+
+    HTTPS_4_IPLIST = "out/3_https_hosts_v4.ips"
+    HTTPS_6_IPLIST = "out/3_https_hosts_v6.ips"
+
+    MERGED_IP_LIST = "out/4_merged.ips"
+    MERGED_HOST_LIST = "out/5_merged.csv"
+    ZGRAB_OUT = "out/6_zgrab.json"
+    ZGRAB_MERGED_OUT = "out/7_merged_zgrab.json"
+
+
+ZGRAB_FILTER = JsonFilter(
+    "data.http.result.*",
+    "!data.http.result.response.request.tls_log",
+    "*.handshake_log.server_certificates.*.parsed",
+)
+
+
 def main(TRANCO_NUM=None, DRY_RUN=False):
     # memmonitor = MemoryMonitor()
     # memmonitor.start()
 
-    class CONST:
-        IPv6SRC = "2001:638:502:28::51"
-        ZGRAB_CONNECTIONS_PER_HOST = 5
-
-    class EXEUTABLES:
-        JQ = "jq"
-        ZDNS = "/root/zdns/zdns"
-        ZMAP4 = "/root/zmap/src/zmap"
-        ZMAP6 = "/root/zmapv6/src/zmap"
-        ZGRAB = "/data/cdn_ticket/zgrab2"
-
-    if not op.isdir("out"):
-        os.mkdir("out")
-
-    class FILES:
-        TRANCO = "tranco_7X8NX.csv"
-        BLOCKLIST_4 = "/data/Crawling-Blacklist/blacklist.txt"
-        BLOCKLIST_6 = "/data/Crawling-Blacklist/blacklist-ipv6.txt"
-
-        RESOLVED_DOMAINS = "out/0_resolved.json"
-
-        RESOLVED_IPS4 = "out/1_resolved_v4.ips"
-        RESOLVED_IPS6 = "out/1_resolved_v6.ips"
-
-        FILTERED_4_IPLIST = "out/2_resolved_filtered_v4.ips"
-        FILTERED_6_IPLIST = "out/2_resolved_filtered_v6.ips"
-
-        HTTPS_4_IPLIST = "out/3_https_hosts_v4.ips"
-        HTTPS_6_IPLIST = "out/3_https_hosts_v6.ips"
-
-        MERGED_IP_LIST = "out/4_merged.ips"
-        MERGED_HOST_LIST = "out/5_merged.csv"
-        ZGRAB_OUT = "out/6_zgrab.json"
-        ZGRAB_MERGED_OUT = "out/7_merged_zgrab.json"
-
     stats = _Stats("out/stats.csv")
-
-    ZGRAB_FILTER = JsonFilter(
-        "data.http.result.*",
-        "!data.http.result.response.request.tls_log",
-        "*.handshake_log.server_certificates.*.parsed",
-    )
 
     class STAGES:
         TRANCO = FileLineReader("ReadTranco", stats, FILES.TRANCO, n_lines=TRANCO_NUM)
@@ -682,7 +727,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False):
             stats,
             EXEUTABLES.ZGRAB,
             FILES.ZGRAB_OUT,
-            ZGRAB_FILTER,
+            ZGRAB_FILTER.apply_str_in_str_out,
             "multiple",
             "-c",
             "get-ticket-for-grouping.ini",
@@ -712,12 +757,6 @@ def test_zdns():
     if not op.isdir("out_test"):
         os.mkdir("out_test")
     stats = _Stats("out_test/stats.csv")
-
-    class EXEUTABLES:
-        ZDNS = "/root/zdns/zdns"
-
-    class FILES:
-        TRANCO = "tranco_7X8NX.csv"
 
     tranco = FileLineReader("ReadTranco", stats, FILES.TRANCO, n_lines=100_000)()
 
@@ -751,9 +790,45 @@ def test_zdns():
             raise e
 
 
+def test_zgrab():
+    ZGRAB = ZgrabRunner(
+        "Zgrab",
+        None,
+        EXEUTABLES.ZGRAB,
+        "/dev/null",
+        ZGRAB_FILTER.apply_str_in_str_out,
+        "multiple",
+        "-c",
+        "get-ticket-for-grouping.ini",
+    )
+    if False:
+        ZGRAB = ZgrabRunner(
+            "Zgrab",
+            None,
+            "/usr/bin/cat",
+            "/dev/null",
+            ZGRAB_FILTER,
+            "out/large_zgrab_output.json",
+        )
+    if False:
+        ZGRAB = ZgrabRunner(
+            "Zgrab",
+            None,
+            "/data/cdn_ticket/zgrab2_dummy.py",
+            "/dev/null",
+            ZGRAB_FILTER,
+            "out/large_zgrab_output.json",
+        )
+    # ZGRAB([("1.1.1.1", "foo.bar")])
+    ZGRAB([("20.70.246.20", "microsoft.com")])
+
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)-26s %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG, format="%(asctime)s %(levelname)-5s | %(name)-26s.%(funcName)-20s: %(message)s"
+    )
     # main(10, False)
     # main(None, True)
     main()
     # test_zdns()
+    # test_zgrab()
