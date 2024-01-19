@@ -151,24 +151,23 @@ class zmap:
     closed = Node("Closed", COLORS.black, None, True)
 
 
+_SUMMARIZE_ZGRAB_ERRORS = True
+
+
 @phase
 class zgrab:
-    ticket = Node("tickets", COLORS.green, None)
-    no_ticket = Node("no ticket", COLORS.black, None)
+    ticket_12 = Node("Tickets 1.2", COLORS.blue, None)
+
+    ticket_12_13 = Node("Tickets 1.2 and 1.3", COLORS.cyan, None)
+
+    ticket_13 = Node("Tickets 1.3", COLORS.green, None)
+
+    no_ticket = Node("no tickets", COLORS.black, None)
+
     multiple_errors = Node("multiple_errors", COLORS.red, None, True)
 
-
-_zgrab_statii = set()
-with open(OUTDIR("7_merged_zgrab.json")) as f:
-    for ln in f:
-        item = json.loads(ln)
-        status = set(map(lambda x: x.get("status"), item["results"]))
-        for s in status:
-            _zgrab_statii.add(s)
-for status in _zgrab_statii:
-    if status == "success":
-        continue
-    setattr(zgrab, status, Node(status, COLORS.red, None, True))
+    error = Node("error", COLORS.red, None, True)
+    # error states are added dynamically if _SUMMARIZE_ZGRAB_ERRORS is False
 
 
 # create edges by iterating over all domains
@@ -243,23 +242,62 @@ with open(OUTDIR("7_merged_zgrab.json")) as f:
         domain = domains[domain_name]
 
         tickets = sum(map(lambda x: 1 if x.get("ticket") else 0, item["results"]))
-        status = set(map(lambda x: x.get("status"), item["results"]))
 
-        if len(status) > 1:
-            if "success" in status:
-                status = "success"
-            else:
-                status = "multiple_errors"
-        else:
-            status = status.pop()
+        # STATUSes per version: ticket, no_ticket, error
+        status_13 = set()
+        status_12 = set()
+        errors = set()
 
-        if status == "success":
-            if tickets:
-                domain.phase_associations[zgrab] = zgrab.ticket
+        def get_status(item, ticket_key):
+            status = item["status"]
+            if ticket_key in item:
+                assert status == "success"
+                return "ticket"
             else:
-                domain.phase_associations[zgrab] = zgrab.no_ticket
+                return item["status"]
+
+        for result in item["results"]:
+            status_12.add(get_status(result["tls1_0-1_2"], "ticket"))
+            status_13.add(get_status(result["https-tls1_3"], "tickets"))
+
+        def flatten_statii(statii):
+            if "ticket" in statii:
+                return "ticket"
+            elif "success" in statii:
+                return "no_ticket"
+            else:
+                errors.update(statii)
+                return "error"
+
+        status_12 = flatten_statii(status_12)
+        status_13 = flatten_statii(status_13)
+
+        if status_12 == "ticket" and status_13 == "ticket":
+            classification = zgrab.ticket_12_13
+        elif status_12 == "ticket":
+            classification = zgrab.ticket_12
+        elif status_13 == "ticket":
+            classification = zgrab.ticket_13
+        elif status_12 == "no_ticket" or status_13 == "no_ticket":
+            classification = zgrab.no_ticket
         else:
-            domain.phase_associations[zgrab] = getattr(zgrab, status)
+            if _SUMMARIZE_ZGRAB_ERRORS:
+                classification = zgrab.error
+            else:
+                # classification = "+".join(sorted(errors))
+                if len(errors) > 1:
+                    classification = zgrab.multiple_errors
+                else:
+                    classification = errors.pop()
+
+        if isinstance(classification, str):
+            if not hasattr(zgrab, classification):
+                print("Adding", classification)
+                setattr(zgrab, classification, Node(classification, COLORS.red, None, True))
+            domain.phase_associations[zgrab] = getattr(zgrab, classification)
+        else:
+            domain.phase_associations[zgrab] = classification
+
 
 print("Loading Nodes")
 nodes = []
