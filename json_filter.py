@@ -276,8 +276,8 @@ def _test_list():
 
 def _test_real():
     PATHS_TO_FILTER = (
-        "data.http.result.*",
-        "!data.http.result.response.request.tls_log",
+        "data.https-tls1_3.result.*",
+        "!data.https-tls1_3.result.response.request.tls_log",
         "*.handshake_log.server_certificates.*.parsed",
     )
     filter = Filter(*PATHS_TO_FILTER)
@@ -323,14 +323,17 @@ def _test_real():
     print(len(str(filtered)))
     # print(filtered)
 
-    _check(filtered, "data.http.result.response", bool)
-    _check_not(filtered, "data.http.result.response.protocol")
-    _check(filtered, "data.http.result.response.request.tls_log.handshake_log.server_hello", bool)
+    _check(filtered, "data.https-tls1_3.result.response", bool)
+    _check_not(filtered, "data.https-tls1_3.result.response.protocol")
+    _check(filtered, "data.https-tls1_3.result.response.request.tls_log.handshake_log.server_hello", bool)
     _check(
-        filtered, "data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate.raw", bool
+        filtered,
+        "data.https-tls1_3.result.response.request.tls_log.handshake_log.server_certificates.certificate.raw",
+        bool,
     )
     _check_not(
-        filtered, "data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate.parsed"
+        filtered,
+        "data.https-tls1_3.result.response.request.tls_log.handshake_log.server_certificates.certificate.parsed",
     )
 
 

@@ -580,6 +580,59 @@ class PostProcessZGrab(Stage[None]):
         super().__init__("Postprocess Zgrab", stats)
         self.connections_per_host = connections_per_host
 
+    def parse_https_result(self, item):
+        try:
+            tls_log = item["response"]["request"]["tls_log"]
+        except KeyError:
+            return {"_error": "No tls_log"}
+        else:
+            return self.parse_tls_result(tls_log)
+
+    def parse_tls_result(self, item):
+        ret = {}
+        try:
+            server_hello = item["handshake_log"]["server_hello"]
+            version = server_hello["version"]
+            if "supported_versions" in server_hello:
+                version = server_hello["supported_versions"]["selected_version"]
+            version = version["name"]
+            ret["version"] = version
+        except KeyError:
+            ret["_error"] = "No server hello -> no version"
+
+        if version:
+            try:
+                if version == "TLSv1.3":
+                    post_handshake = item["handshake_log"]["post_handshake"]
+                    tickets = post_handshake["session_tickets"]
+                    ret["tickets"] = []
+                    for ticket in tickets:
+                        ret["tickets"].append(ticket["value"])
+                else:
+                    ret["ticket"] = item["handshake_log"]["session_ticket"]["value"]
+            except KeyError:
+                ret["_error"] = f"No Tickets found"
+        return ret
+
+    def parse_result(self, item):
+        protocol = item["protocol"]
+        result = item.get("result", None)
+        ret = {}
+        ret["status"] = item.get("status", None)
+        if "error" in item:
+            ret["error"] = item["error"]
+
+        if result:
+            if protocol == "http":
+                ret.update(self.parse_https_result(result))
+            elif protocol == "tls":
+                ret.update(self.parse_tls_result(result))
+            else:
+                raise ValueError(f"Unknown protocol {protocol}")
+        else:
+            ret["_error"] = "No result"
+        return ret
+
     def run_stage(self, zgrab_out_file: str, outfile: str) -> None:
         if op.isfile(outfile):
             self.logger.warning(f"Output file {outfile!r} already exists. Skipping.")
@@ -590,7 +643,7 @@ class PostProcessZGrab(Stage[None]):
             total = f_in.tell()
             f_in.seek(0)
 
-            zgrab_results = {}
+            grouped_zgrab_results = {}
             handled = set()
 
             while ln := f_in.readline():
@@ -599,33 +652,29 @@ class PostProcessZGrab(Stage[None]):
                 domain = item["domain"]
 
                 zgrab_result = {}
+                for probe, value in item["data"].items():
+                    assert probe not in zgrab_result
+                    zgrab_result[probe] = self.parse_result(value)
+
                 # TODO 1.3/https, notify Tim
-                try:
-                    zgrab_result["ticket"] = item["data"]["tls"]["result"]["handshake_log"]["session_ticket"]
-                except KeyError:
-                    zgrab_result["ticket"] = None
-                try:
-                    zgrab_result["status"] = item["data"]["tls"]["status"]
-                except KeyError:
-                    zgrab_result["status"] = None
 
                 key = (ip, domain)
-                if key not in zgrab_results:
+                if key not in grouped_zgrab_results:
                     assert key not in handled
-                    zgrab_results[key] = []
+                    grouped_zgrab_results[key] = []
 
-                zgrab_results[key].append(zgrab_result)
+                grouped_zgrab_results[key].append(zgrab_result)
 
-                if len(zgrab_results[key]) >= self.connections_per_host:
-                    json.dump({"ip": ip, "domain": domain, "results": zgrab_results[key]}, f_out)
+                if len(grouped_zgrab_results[key]) >= self.connections_per_host:
+                    json.dump({"ip": ip, "domain": domain, "results": grouped_zgrab_results[key]}, f_out)
                     f_out.write("\n")
-                    del zgrab_results[key]
+                    del grouped_zgrab_results[key]
                     handled.add(key)
                     if len(handled) % 10_000 == 0:
                         print(
-                            f"Handled: {len(handled):7d} ({100*f_in.tell()/total:6.2f}%) | Currently open: {len(zgrab_results):7d}"
+                            f"Handled: {len(handled):7d} ({100*f_in.tell()/total:6.2f}%) | Currently open: {len(grouped_zgrab_results):7d}"
                         )
-            assert not zgrab_results, zgrab_results
+            assert not grouped_zgrab_results, grouped_zgrab_results
             return len(handled)
 
 
@@ -669,8 +718,8 @@ class FILES:
 
 
 ZGRAB_FILTER = JsonFilter(
-    "data.http.result.*",
-    "!data.http.result.response.request.tls_log",
+    "data.https-tls1_3.result.*",
+    "!data.https-tls1_3.result.response.request.tls_log",
     "*.handshake_log.server_certificates.*.parsed",
 )
 
@@ -825,7 +874,7 @@ def test_zgrab():
 
 if __name__ == "__main__":
     logging.basicConfig(
-        level=logging.DEBUG, format="%(asctime)s %(levelname)-5s | %(name)-26s.%(funcName)-20s: %(message)s"
+        level=logging.DEBUG, format="%(asctime)s %(levelname)-7s | %(name)-26s.%(funcName)-20s: %(message)s"
     )
     # main(10, False)
     # main(None, True)
