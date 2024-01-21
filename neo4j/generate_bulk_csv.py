@@ -3,54 +3,99 @@ import csv
 import base64
 import json
 from tqdm import tqdm
+import sys
 
 # for a useful progress bar
-NUM_LINES = 1909754
+NUM_LINES = 2128158
 
 nodes = set()
 edges = set()
 
 
-@dataclass(frozen=True)
+@dataclass()
 class Node:
+    _FILENAME = ""
+    _HEADER_FILENAME = ""
+    _WRITER = csv.writer(sys.stdout)
     uid: int
     content: str
-    label: str
+    labels: str
 
     def __hash__(self):
-        return hash((self.label, self.content))
+        return hash((self.labels, self.content))
 
     def __init__(self, content, label):
         self.content = content
-        self.label = label
+        self.labels = label
         self.uid = hash(self)
 
     def row(self):
-        return (self.uid, self.content, self.label)
+        return (self.uid, self.content, self.labels)
+
+    def header():
+        return ":ID,content,:LABEL"
+
+    def write_to_csv(self):
+        self._WRITER.writerow(self.row())
 
 
 class PrefixNode(Node):
-    def __init__(self, prefix):
-        length = len(prefix)
-        assert length % 2 == 0
-        label = f"PREFIX;PREFIX{length//2}"
-        super().__init__(content=prefix, label=label)
+    _FILENAME = "import/prefixes.csv"
+    _HEADER_FILENAME = "import/prefixes_header.csv"
+    _WRITER = csv.writer(open(_FILENAME, "w"))
+
+    def __init__(self, prefix, version, scan):
+        self.prefix_length = len(prefix) // 2  # hex, but we want bytes length
+        self.version = version
+        self.scan = scan
+
+        super().__init__(content=prefix, label="PREFIX")
+
+    def header():
+        return ":ID,prefix,length:int,version,scan,:LABEL"
+
+    def row(self):
+        return (
+            self.uid,
+            self.content,
+            self.prefix_length,
+            self.version,
+            self.scan,
+            self.labels,
+        )
 
 
 class DomainNode(Node):
+    _FILENAME = "import/domains.csv"
+    _HEADER_FILENAME = "import/domains_header.csv"
+    _WRITER = csv.writer(open(_FILENAME, "w"))
+
     def __init__(self, domain):
         super().__init__(content=domain, label="DOMAIN")
 
+    def header():
+        return ":ID,domain,:LABEL"
+
 
 class IPNode(Node):
+    _FILENAME = "import/ips.csv"
+    _HEADER_FILENAME = "import/ips_header.csv"
+    _WRITER = csv.writer(open(_FILENAME, "w"))
+
     def __init__(self, ip):
         is_ipv6 = ":" in ip
         label = "IP;" + ("IPV6" if is_ipv6 else "IPV4")
         super().__init__(content=ip, label=label)
 
+    def header():
+        return ":ID,ip,:LABEL"
+
 
 @dataclass
 class Edge:
+    _FILENAME = "import/relationships.csv"
+    _HEADER_FILENAME = "import/relationships_header.csv"
+    _WRITER = csv.writer(open(_FILENAME, "w"))
     uid: int
     src: hash(Node)
     dst: hash(Node)
@@ -68,79 +113,66 @@ class Edge:
     def row(self):
         return (self.src, self.dst, self.label)
 
+    def header():
+        return ":START_ID,:END_ID,:TYPE"
 
-"""
-p = PrefixNode("abab")
-d = DomainNode("google.com")
-i4 = IPNode("127.0.0.1")
-i6 = IPNode(":::1")
-print(p, d, i4, i6)
+    def write_to_csv(self):
+        self._WRITER.writerow(self.row())
 
-e = Edge(p, i4)
-print(e)
-"""
 
-with open("import/domains_header.csv", "w") as f:
-    f.write(":ID,domain,:LABEL\n")
-with open("import/ips_header.csv", "w") as f:
-    f.write(":ID,ip,:LABEL\n")
-with open("import/prefixes_header.csv", "w") as f:
-    f.write(":ID,prefix,:LABEL\n")
-with open("import/relationships_header.csv", "w") as f:
-    f.write(":START_ID,:END_ID,:TYPE\n")
-
-with open("../out/7_merged_zgrab.json") as f, open("import/domains.csv", "w") as fd, open(
-    "import/ips.csv", "w"
-) as fi, open("import/prefixes.csv", "w") as fp, open("import/relationships.csv", "w") as fr:
-    # ugh, lets make this somewhat portable
-    wd = csv.writer(fd)
-    wi = csv.writer(fi)
-    wp = csv.writer(fp)
-    wr = csv.writer(fr)
-
-    # for a useful progress bar
-    # use line number for unique hashes
+# for a useful progress bar
+print("[1] Generating nodes and edges")
+with open("../out/7_merged_zgrab.json") as f:
     for i, ln in enumerate(tqdm(f, total=NUM_LINES)):
         item = json.loads(ln)
 
-        ip = IPNode(item["ip"])
-        domain = DomainNode(item["domain"])
+        ip_node = IPNode(item["ip"])
+        domain_node = DomainNode(item["domain"])
+        nodes.add(ip_node)
+        nodes.add(domain_node)
 
-        domain_to_ip_edge = Edge(domain, ip, "USES")
+        # domain --:USES--> ip
+        edges.add(Edge(domain_node, ip_node, "USES"))
 
-        tickets = item["tickets"]
-        # filter tickets
-        while None in tickets:
-            tickets.remove(None)
+        for connection in item["results"]:
+            for probe_name, result in connection.items():
+                if "_error" in result:
+                    # _error does not appear when we have a successful connection
+                    continue
+                # not a fan, might as well use "tickets" for 1.2 as well :D
+                tickets = result.get("tickets", []) + (
+                    [result["ticket"]] if "ticket" in result else []
+                )
 
-        tickets = list(filter(lambda x: "value" in x, tickets))
-        if len(tickets) > 0:
-            tickets = map(lambda x: x["value"], tickets)
-            tickets = map(base64.b64decode, tickets)
-            tickets = tuple(tickets)
+                for ticket in tickets:
+                    # ticket is a base64 encoded ticket, we are only interested in the first 4 and 16 bytes
+                    ticket = base64.b64decode(ticket)
+                    prefix4 = PrefixNode(
+                        ticket[:4].hex(), result["version"], scan=probe_name
+                    )
+                    prefix16 = PrefixNode(
+                        ticket[:16].hex(), result["version"], scan=probe_name
+                    )
 
-            prefixes = set([t[:4] for t in tickets] + [t[:16] for t in tickets])
+                    nodes.add(prefix4)
+                    nodes.add(prefix16)
 
-            if domain not in nodes:
-                wd.writerow(domain.row())
-                nodes.add(domain)
-            if ip not in nodes:
-                wi.writerow(ip.row())
-                nodes.add(ip)
-            if domain_to_ip_edge not in edges:
-                wr.writerow(domain_to_ip_edge.row())
-                edges.add(domain_to_ip_edge)
+                    # ip --:ISSUES--> prefix, domain --:ISSUES--> prefix
+                    edges.add(Edge(ip_node, prefix4, "ISSUES"))
+                    edges.add(Edge(domain_node, prefix4, "ISSUES"))
+                    # ip --:ISSUES--> prefix, domain --:ISSUES--> prefix
+                    edges.add(Edge(ip_node, prefix16, "ISSUES"))
+                    edges.add(Edge(domain_node, prefix16, "ISSUES"))
 
-            for p in prefixes:
-                prefix = PrefixNode(p.hex())
-                if prefix not in nodes:
-                    wp.writerow(prefix.row())
-                    nodes.add(prefix)
-                domain_to_prefix_edge = Edge(domain, prefix, "ISSUES")
-                if domain_to_prefix_edge not in edges:
-                    wr.writerow(domain_to_prefix_edge.row())
-                    edges.add(domain_to_prefix_edge)
-                ip_to_prefix_edge = Edge(ip, prefix, "ISSUES")
-                if ip_to_prefix_edge not in edges:
-                    wr.writerow(ip_to_prefix_edge.row())
-                    edges.add(ip_to_prefix_edge)
+
+print("[2] Writing headers to csv")
+for object in [DomainNode, IPNode, PrefixNode, Edge]:
+    with open(object._HEADER_FILENAME, "w") as f:
+        f.write(object.header())
+
+print("[3] Writing edges to csv")
+for e in tqdm(edges):
+    e.write_to_csv()
+print("[4] Writing nodes to csv")
+for n in tqdm(nodes):
+    n.write_to_csv()

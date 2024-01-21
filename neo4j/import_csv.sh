@@ -1,4 +1,4 @@
-# beware: /import is not the folder in this directory, but the mountpoint within the container
+# beware: /import is not the folder in this directory, but the mountpoint within the container, which is mounted in run_neo4j.sh
 docker exec --interactive --tty steckruebe-graph-database neo4j-admin database import full \
 	--nodes /import/domains_header.csv,/import/domains.csv \
 	--nodes /import/ips_header.csv,/import/ips.csv \
