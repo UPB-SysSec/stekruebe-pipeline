@@ -656,8 +656,6 @@ class PostProcessZGrab(Stage[None]):
                     assert probe not in zgrab_result
                     zgrab_result[probe] = self.parse_result(value)
 
-                # TODO 1.3/https, notify Tim
-
                 key = (ip, domain)
                 if key not in grouped_zgrab_results:
                     assert key not in handled
