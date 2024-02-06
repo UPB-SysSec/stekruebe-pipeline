@@ -1,14 +1,16 @@
 0. tranco
-1. `run.sh` **TODO** measure where hosts get lost
+1. `run.py`
     - `zdns`
     - `zmap`
-    - `zgrab2 TLS` **TODO** 1.2 or 1.3 or both?
+    - `zgrab2 TLS and HTTP`
+        - uses `get-ticket-for-grouping.ini`
 2. import data into neo4j
     1. `generate_bulk_csv.py`
     2. `import_csv.sh`
-3. cluster using `sampling_neo4j.py`
-    - calls `scan.py`
-    - calls `zgrab2 http --use-tls` (2 times) **TODO** 1.2 or 1.3 or both?
+    3. `generate_wcc.sh`
+3. cluster/sample using `sampling_neo4j.py`
+    - calls `zgrab2 http --use-tls` (2 times) **TODO** 1.2 and 1.3
+    - **TODO** filter stored data
 4. distinguish cases
     - no resumption -> safe
     - resumed

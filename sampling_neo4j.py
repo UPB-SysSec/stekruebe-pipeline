@@ -199,7 +199,7 @@ class Zgrab2Scanner(Scanner):
     _INITIAL_TICKET_1_2_CONFIG = [
         "./zgrab2",
         "tls",
-        "--min-version=0x0303",
+        "--min-version=0x0301",
         "--max-version=0x0303",
         "--force-session-ticket",
         "--port=443",
@@ -225,8 +225,8 @@ class Zgrab2Scanner(Scanner):
         "--max-redirects=1",
         "--redirects-succeed",
         # tls options
-        "--min-version=0x0303",
-        "--max-version=0x0303",
+        "--min-version=0x0303",  # TODO TLS: match with initial ticket dynamically
+        "--max-version=0x0303",  # TODO TLS: match with initial ticket dynamically
         "--port=443",
         "--use-session-cache=1",
     ]
@@ -293,8 +293,7 @@ class Zgrab2Scanner(Scanner):
             result["initial"] = json.loads(initial.stdout)
             result["zgrab_initial_exitcode"] = initial.returncode
 
-            # TODO check whether initial gave a ticket
-            # TODO persist status line from stderr?
+            # TODO TLS: check whether initial gave a ticket
 
             input_string = "".join([f"{target_addr.ip},{domain_from}\n" for target_addr in target_addrs]).encode()
             redirect = subprocess.run(
@@ -304,10 +303,10 @@ class Zgrab2Scanner(Scanner):
             )
             result["zgrab_redirect_exitcode"] = redirect.returncode
             redirect_results = [json.loads(res) for res in redirect.stdout.splitlines()]
-            # TODO: filter objects
+            # TODO SH: filter objects
             # HTTP: body_sha, body_title, status_code, location_header
             # del certs
-            # TODO persist status line from stderr?
+            # TODO SH: persist status line from stderr?
             result["redirect"] = redirect_results
             # newline separated json objects
             return result
