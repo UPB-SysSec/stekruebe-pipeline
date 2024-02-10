@@ -179,8 +179,10 @@ class _ProfileDriver:
 
 
 class ScanVersion(Enum):
-    TLS1_2 = "12"
-    TLS1_3 = "13"
+    TLS1_0 = "0x0301"
+    TLS1_1 = "0x0302"
+    TLS1_2 = "0x0303"
+    TLS1_3 = "0x0304"
 
 
 class Scanner(abc.ABC):
@@ -196,52 +198,39 @@ class DummyScanner(Scanner):
 
 
 class Zgrab2Scanner(Scanner):
-    _INITIAL_TICKET_1_2_CONFIG = [
-        "./zgrab2",
-        "tls",
-        "--min-version=0x0301",
-        "--max-version=0x0303",
-        "--force-session-ticket",
-        "--port=443",
-        "--use-session-cache=2",
-    ]
-    _INITIAL_TICKET_1_3_CONFIG = [
-        "./zgrab2",
-        "http",
-        "--use-https",
-        "--max-redirects=1",
-        "--redirects-succeed",
-        # tls options
-        "--min-version=0x0304",
-        "--max-version=0x0304",
-        "--port=443",
-        "--use-session-cache=2",
-    ]
+    def build_command(probe="http", max_redirects=1, redirects_succeed=True, force_session_tickets=False, min_version=0x0303, max_version=0x0303, port=443, use_session_cache=1, session_cache_dir="cache"):
+        """
+        This method implements generating a call to a small subset of zgrab2 probe functionality with a few (by no means exhaustive) sanity checks.
+        Use it to construct a command that calls zgrab2 which can be passed into subprocess.run and similar.
+        For documentation, see zgrab2 -h.
+        """
+        cmd = ["./zgrab2",]
 
-    _REDIRECT_TICKET_1_2_CONFIG = [
-        "./zgrab2",
-        "http",
-        "--use-https",
-        "--max-redirects=1",
-        "--redirects-succeed",
-        # tls options
-        "--min-version=0x0303",  # TODO TLS: match with initial ticket dynamically
-        "--max-version=0x0303",  # TODO TLS: match with initial ticket dynamically
-        "--port=443",
-        "--use-session-cache=1",
-    ]
-    _REDIRECT_TICKET_1_3_CONFIG = [
-        "./zgrab2",
-        "http",
-        "--use-https",
-        "--max-redirects=1",
-        "--redirects-succeed"
-        # tls options
-        "--min-version=0x0304",
-        "--max-version=0x0304",
-        "--port=443",
-        "--use-session-cache=1",
-    ]
+        if probe not in ["http", "tls"]:
+            raise NotImplementedError()
+        cmd.append(f"{probe}")
+
+        if probe == "http":
+            cmd.append("--use-https")
+            if redirects_succeed:
+                cmd.append("--redirects-succeed")
+            if max_redirects:
+                cmd.append(f"--max-redirects={max_redirects}")
+
+        if force_session_tickets:
+            cmd.append("--force-session-ticket")
+
+        cmd.append(f"--min-version={min_version}")
+        cmd.append(f"--max-version={max_version}")
+
+        cmd.append(f"--port={port}")
+
+        if use_session_cache:
+            cmd.append(f"--use-session-cache={use_session_cache}")
+        if use_session_cache and session_cache_dir is not None:
+            cmd.append(f"--session-cache-dir={session_cache_dir}")
+
+        return cmd
 
     def __init__(
         self, mongo_driver, db_name="steckruebe", collection_name=f"ticket_redirection_{str(datetime.datetime.now())}"
@@ -251,53 +240,74 @@ class Zgrab2Scanner(Scanner):
         self.mongo_collection = self.mongo_db[collection_name]
 
     def scan(self, domain_from: str, addr_from: Connectable, *target_addrs: Connectable, version):
-        if version == ScanVersion.TLS1_2:
-            res = self._scan_by_config(
-                domain_from,
-                addr_from,
-                *target_addrs,
-                initial_config=self._INITIAL_TICKET_1_2_CONFIG,
-                redirect_config=self._REDIRECT_TICKET_1_2_CONFIG,
-            )
-            # potentially version specific pre-database processing here
-        elif version == ScanVersion.TLS1_3:
-            res = self._scan_by_config(
-                domain_from,
-                addr_from,
-                *target_addrs,
-                initial_config=self._INITIAL_TICKET_1_3_CONFIG,
-                redirect_config=self._REDIRECT_TICKET_1_3_CONFIG,
-            )
-        else:
-            raise ValueError("Unknown version")
+        """
+        This method implements the scanning of a domain and its targets.
+        It calls into the implementation _scan and is mainly responsible for persisting the results.
+        """
+        res = self._scan(domain_from, addr_from, *target_addrs, version=version)
         insert = self.mongo_collection.insert_one(res)
         STATS.done_targets(len(target_addrs))
 
-    def _scan_by_config(
+    def _scan(
         self,
         domain_from: str,
         addr_from: Connectable,
         *target_addrs: Connectable,
-        initial_config: list,
-        redirect_config: list,
+        version: ScanVersion,
     ):
+        """
+        This method implements the actual scanning of a domain and its targets.
+        """ 
         # get ticket for domain_from
         input_string = f"{addr_from.ip},{domain_from},\n".encode()
         with tempfile.TemporaryDirectory() as cache_dir:
+            if version == ScanVersion.TLS1_2:
+                initial_config = Zgrab2Scanner.build_command(
+                    probe="tls", force_session_tickets=True, min_version=0x0301, max_version=0x0303, port=443, use_session_cache=2, session_cache_dir=cache_dir
+                )
+            elif version == ScanVersion.TLS1_3:
+                initial_config = Zgrab2Scanner.build_command(
+                    probe="http", max_redirects=1, redirects_succeed=True, min_version=0x0304, max_version=0x0304, port=443, use_session_cache=2, session_cache_dir=cache_dir
+                )
+            else:
+                #FIXME: technically this is implemented, but not tested
+                raise NotImplementedError()
+
             initial = subprocess.run(
-                initial_config + ["--session-cache-dir", cache_dir],
+                initial_config,
                 input=input_string,
                 capture_output=True,
             )
+
             result = dict()
             result["initial"] = json.loads(initial.stdout)
             result["zgrab_initial_exitcode"] = initial.returncode
 
-            # TODO TLS: check whether initial gave a ticket
+            # stop if no ticket was found, even though we expected one
+            try:
+                if result["initial"]["data"]["tls"]["result"]["handshake_log"]["session_ticket"] is not None:
+                    initial_version_key = hex(result["initial"]["data"]["tls"]["result"]["handshake_log"]["server_hello"]["version"]["value"])
+            except KeyError:
+                print("failed before redirecting, no ticket found")
+                result["redirect"] = None
+                return result
+
+            if version == ScanVersion.TLS1_2:
+                redirect_config = Zgrab2Scanner.build_command(
+                    #FIXME: previously version up to 1.2 for resumption or exactly the previous version? 
+                    probe="http", max_redirects=1, redirects_succeed=True, min_version=initial_version_key, max_version=0x0303, port=443, use_session_cache=1, session_cache_dir=cache_dir
+                )
+            elif version == ScanVersion.TLS1_3:
+                redirect_config = Zgrab2Scanner.build_command(
+                    probe="http", max_redirects=1, redirects_succeed=True, min_version=0x0304, max_version=0x0304, port=443, use_session_cache=1, session_cache_dir=cache_dir
+                )
+            else:
+                #FIXME: technically this is implemented, but not tested
+                raise NotImplementedError()
 
             input_string = "".join([f"{target_addr.ip},{domain_from}\n" for target_addr in target_addrs]).encode()
             redirect = subprocess.run(
-                redirect_config + ["--session-cache-dir", cache_dir],
+                redirect_config,
                 input=input_string,
                 capture_output=True,
             )
@@ -421,7 +431,7 @@ def main(parallelize, create_indexes=True, profile=True):
 
     # CLUSTER = None
     # LIMIT = None
-    CLUSTER = 4283  # Test Cluster (8409 domains)
+    CLUSTER = 696  # Test Cluster (6582 domains)
     LIMIT = 10000  # Test Limit
     DOMAINS = set(get_domains(neo4j_driver, CLUSTER, LIMIT))
     print(f"Fetched {len(DOMAINS)} domains")
