@@ -9,7 +9,7 @@
     2. `import_csv.sh`
     3. `generate_wcc.sh`
 3. cluster/sample using `sampling_neo4j.py`
-    - calls `zgrab2 http --use-tls` (2 times) **TODO** 1.2 and 1.3
+    - calls `zgrab2 http --use-tls` (2 times)
     - **TODO** filter stored data
 4. distinguish cases
     - no resumption -> safe
@@ -23,3 +23,5 @@ Determining if same website
 - both  200: check same title/body
 - both  3xx: check same location header
 - 200 + 3xx: check location header to ticket issuer
+
+_IF_ we notice that redirection has different statistics in 1.3 and 1.2, we need to change scanning procedure; Then we want to behave similar to IPv4 vs IPv6.
