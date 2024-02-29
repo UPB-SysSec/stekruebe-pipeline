@@ -22,7 +22,7 @@ class Node:
     labels: str
 
     def __hash__(self):
-        return hash((self.labels, self.content))
+        return hash((self.content, self.labels))
 
     def __init__(self, content, label):
         self.content = content
@@ -50,6 +50,9 @@ class PrefixNode(Node):
         self.scan = scan
 
         super().__init__(content=prefix, label="PREFIX")
+
+    def __hash__(self):
+        return hash((self.content, self.prefix_length, self.version, self.scan, self.labels))
 
     def header():
         return ":ID,prefix,length:int,version,scan,:LABEL"
@@ -104,11 +107,11 @@ class Edge:
     def __init__(self, src, dst, label):
         self.src = hash(src)
         self.dst = hash(dst)
-        self.uid = hash((src, dst))
         self.label = label
+        self.uid = hash(self)
 
     def __hash__(self):
-        return hash((self.uid, self.label))
+        return hash(self.row())
 
     def row(self):
         return (self.src, self.dst, self.label)
