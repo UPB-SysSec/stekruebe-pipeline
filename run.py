@@ -1,5 +1,6 @@
 # A hopefully more configurable way to run our whole pipeline
 from collections.abc import Callable, Iterable, Mapping
+import sys
 import csv
 import ipaddress
 import json
@@ -224,8 +225,7 @@ class Stage(ABC, Generic[OUTPUTS]):
             self.stats.store(self.name, name, data)
 
     @abstractmethod
-    def run_stage(self, *args, **kwargs) -> OUTPUTS:
-        ...
+    def run_stage(self, *args, **kwargs) -> OUTPUTS: ...
 
     def __call__(self, *args, **kwargs) -> Any:
         self.logger.info(f"Starting")
@@ -874,6 +874,8 @@ if __name__ == "__main__":
     logging.basicConfig(
         level=logging.DEBUG, format="%(asctime)s %(levelname)-7s | %(name)-26s.%(funcName)-20s: %(message)s"
     )
+    if len(sys.argv) > 1:
+        FILES.TRANCO = sys.argv[1]
     # main(10, False)
     # main(None, True)
     main()

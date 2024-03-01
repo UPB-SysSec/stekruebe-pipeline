@@ -7,12 +7,16 @@ from typing import Any
 from neo4j import GraphDatabase, Driver, Session, Result
 from enum import Enum
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import datetime
 from multiprocessing.pool import ThreadPool
 from pymongo import MongoClient
 from threading import Thread
 import inspect
+import traceback
+from json_filter import Filter as JsonFilter
+import re
+from itertools import product
 
 with open("neo4j/credentials") as f:
     neo4j_user, neo4j_password = f.read().strip().split(":")
@@ -128,10 +132,10 @@ STATS = _Stats()
 
 def _stats_printer():
     while STATS.start_time == 0:
-        time.sleep(2)
+        time.sleep(1)
     while True:
         print(STATS)
-        time.sleep(2)
+        time.sleep(60)
 
 
 Thread(target=_stats_printer, daemon=True, name="Stats Printer").start()
@@ -183,6 +187,7 @@ class ScanVersion(Enum):
     TLS1_1 = "0x0302"
     TLS1_2 = "0x0303"
     TLS1_3 = "0x0304"
+    PRE_1_3 = "_custom_"
 
     @classmethod
     def from_name(cls, name: str):
@@ -192,14 +197,111 @@ class ScanVersion(Enum):
 
 class Scanner(abc.ABC):
     @abc.abstractmethod
-    def scan(self, domain_from: str, addr_from: Connectable, *targed_addrs: Connectable, version=ScanVersion.TLS1_2):
+    def scan(self, domain_from: str, addr_from: Connectable, target_addrs: list[Connectable], version):
         pass
 
 
 class DummyScanner(Scanner):
-    def scan(self, domain_from: str, addr_from: Connectable, *targed_addrs: Connectable, version=...):
-        print(f"Scanning {domain_from} from {addr_from} to {len(targed_addrs)} targets on version {version.value}")
-        STATS.done_targets(len(targed_addrs))
+
+    def scan(self, domain_from: str, addr_from: Connectable, target_addrs: list[Connectable], version):
+        print(f"Scanning {domain_from} from {addr_from} to {len(target_addrs)} targets on version {version.name}")
+        STATS.done_targets(len(target_addrs))
+
+
+class Zgrab2ResumptionResultStatus(Enum):
+    PENDING = "pending"
+    INITIAL_RAN = "initial_ran"
+    INITIAL_PARSED = "initial_parsed"
+    INITIAL_NO_TICKET = "initial_no_ticket"
+    INITIAL_NO_VERSION = "initial_no_version"
+    RESUMPTION_RAN = "resumption_ran"
+    RESUMPTION_PARSED = "resumption_parsed"
+    SUCCESS = "success"
+
+
+class ZgrabHelper:
+    @staticmethod
+    def get_tls_handshake_log(result: dict):
+        data = result.get("data")
+        if "http" in data:
+            return data["http"]["result"]["response"]["request"]["tls_log"]["handshake_log"]
+        try:
+            return data["tls"]["result"]["handshake_log"]
+        except KeyError:
+            return None
+
+    @staticmethod
+    def has_ticket(result: dict):
+        try:
+            handshake_log = ZgrabHelper.get_tls_handshake_log(result)
+            if ZgrabHelper.get_version_name(result) == "TLSv1.3":
+                post_handshake = handshake_log["post_handshake"]
+                tickets = post_handshake["session_tickets"]
+                return bool(tickets)
+            else:
+                return bool(handshake_log["session_ticket"])
+        except KeyError:
+            return False
+
+    @staticmethod
+    def get_version(result: dict):
+        try:
+            server_hello = ZgrabHelper.get_tls_handshake_log(result)["server_hello"]
+            version = server_hello["version"]
+            if "supported_versions" in server_hello:
+                version = server_hello["supported_versions"]["selected_version"]
+            return version
+        except KeyError:
+            return None
+
+    @staticmethod
+    def get_version_name(result: dict):
+        try:
+            return ZgrabHelper.get_version(result)["name"]
+        except (KeyError, TypeError):
+            return None
+
+    @staticmethod
+    def get_version_key(result: dict):
+        try:
+            return hex(ZgrabHelper.get_version(result)["value"])
+        except (KeyError, TypeError):
+            return None
+
+
+@dataclass
+class Zgrab2ResumptionResult:
+    domain_from: str
+    addr_from: Connectable
+    target_addrs: list[Connectable]
+    version: ScanVersion
+    status: Zgrab2ResumptionResultStatus
+    error: str = None
+    initial: dict = None
+    initial_exitcode: int = None
+    redirect: list[dict] = None
+    redirect_exitcode: int = None
+
+    def _json_default(self, o):
+        if isinstance(o, Enum):
+            return o.name
+        return o.__dict__
+
+    def to_dict(self):
+        # dirty way to convert to
+        return json.loads(json.dumps(self, default=self._json_default))
+
+
+ZGRAB2_FILTER = JsonFilter(
+    "data.http.result.*",
+    "!data.http.result.response.body_sha256",
+    "!data.http.result.response.headers",
+    "!data.http.result.response.content_title",
+    "!data.http.result.response.content_length",
+    "!data.http.result.response.request.tls_log",
+    "*.handshake_log.server_certificates.*.parsed",
+)
+TITLE_RE = re.compile(r"<title>(.*)</title>")
 
 
 class Zgrab2Scanner(Scanner):
@@ -250,27 +352,52 @@ class Zgrab2Scanner(Scanner):
         return cmd
 
     def __init__(
-        self, mongo_driver, db_name="steckruebe", collection_name=f"ticket_redirection_{str(datetime.datetime.now())}"
+        self,
+        mongo_driver: MongoClient,
+        db_name="steckruebe",
+        collection_name=f"ticket_redirection_{str(datetime.datetime.now())}",
     ) -> None:
         self.mongo_driver = mongo_driver
         self.mongo_db = mongo_driver[db_name]
         self.mongo_collection = self.mongo_db[collection_name]
 
-    def scan(self, domain_from: str, addr_from: Connectable, *target_addrs: Connectable, version):
+    def scan(self, domain_from: str, addr_from: Connectable, target_addrs: list[Connectable], version):
         """
         This method implements the scanning of a domain and its targets.
         It calls into the implementation _scan and is mainly responsible for persisting the results.
         """
-        res = self._scan(domain_from, addr_from, *target_addrs, version=version)
+        res = Zgrab2ResumptionResult(
+            domain_from, addr_from, target_addrs, version, Zgrab2ResumptionResultStatus.PENDING
+        )
+        try:
+            _res = self._scan(domain_from, addr_from, target_addrs, version, res)
+            assert _res is res
+            res = res.to_dict()
+        except Exception as e:
+            res = {"error": str(e), "traceback": traceback.format_exc()}
+        assert isinstance(res, dict)
         insert = self.mongo_collection.insert_one(res)
         STATS.done_targets(len(target_addrs))
+
+    def filter_result(self, result: dict):
+        try:
+            body = result["data"]["http"]["result"]["response"]["body"]
+            # extract title from html body
+            title = TITLE_RE.search(body)
+            if title is not None:
+                title = title.group(1)
+            result["data"]["http"]["result"]["response"]["content_title"] = title
+        except KeyError:
+            pass
+        return ZGRAB2_FILTER(result)
 
     def _scan(
         self,
         domain_from: str,
         addr_from: Connectable,
-        *target_addrs: Connectable,
+        target_addrs: Connectable,
         version: ScanVersion,
+        res: Zgrab2ResumptionResult,
     ):
         """
         This method implements the actual scanning of a domain and its targets.
@@ -278,17 +405,7 @@ class Zgrab2Scanner(Scanner):
         # get ticket for domain_from
         input_string = f"{addr_from.ip},{domain_from},\n".encode()
         with tempfile.TemporaryDirectory() as cache_dir:
-            if version == ScanVersion.TLS1_2:
-                initial_config = Zgrab2Scanner.build_command(
-                    probe="tls",
-                    force_session_tickets=True,
-                    min_version=0x0301,
-                    max_version=0x0303,
-                    port=443,
-                    use_session_cache=2,
-                    session_cache_dir=cache_dir,
-                )
-            elif version == ScanVersion.TLS1_3:
+            if version == ScanVersion.TLS1_3:
                 initial_config = Zgrab2Scanner.build_command(
                     probe="http",
                     max_redirects=1,
@@ -300,31 +417,49 @@ class Zgrab2Scanner(Scanner):
                     session_cache_dir=cache_dir,
                 )
             else:
-                # FIXME: technically this is implemented, but not tested
-                raise NotImplementedError()
+                initial_config = Zgrab2Scanner.build_command(
+                    probe="tls",
+                    force_session_tickets=True,
+                    min_version=0x0301,
+                    max_version=0x0303,
+                    port=443,
+                    use_session_cache=2,
+                    session_cache_dir=cache_dir,
+                )
 
             initial = subprocess.run(
                 initial_config,
                 input=input_string,
                 capture_output=True,
             )
+            res.initial_exitcode = initial.returncode
+            res.status = Zgrab2ResumptionResultStatus.INITIAL_RAN
 
-            result = dict()
-            result["initial"] = json.loads(initial.stdout)
-            result["zgrab_initial_exitcode"] = initial.returncode
+            res.initial = self.filter_result(json.loads(initial.stdout))
+            res.status = Zgrab2ResumptionResultStatus.INITIAL_PARSED
 
-            # stop if no ticket was found, even though we expected one
-            try:
-                if result["initial"]["data"]["tls"]["result"]["handshake_log"]["session_ticket"] is not None:
-                    initial_version_key = hex(
-                        result["initial"]["data"]["tls"]["result"]["handshake_log"]["server_hello"]["version"]["value"]
-                    )
-            except KeyError:
-                print("failed before redirecting, no ticket found")
-                result["redirect"] = None
-                return result
+            initial_version_key = ZgrabHelper.get_version_key(res.initial)
+            if initial_version_key is None:
+                # print("failed before redirecting, no version key found")
+                res.status = Zgrab2ResumptionResultStatus.INITIAL_NO_VERSION
+                return res
+            if not ZgrabHelper.has_ticket(res.initial):
+                # print("failed before redirecting, no ticket found")
+                res.status = Zgrab2ResumptionResultStatus.INITIAL_NO_TICKET
+                return res
 
-            if version == ScanVersion.TLS1_2:
+            if version == ScanVersion.TLS1_3:
+                redirect_config = Zgrab2Scanner.build_command(
+                    probe="http",
+                    max_redirects=1,
+                    redirects_succeed=True,
+                    min_version=0x0304,
+                    max_version=0x0304,
+                    port=443,
+                    use_session_cache=1,
+                    session_cache_dir=cache_dir,
+                )
+            else:
                 redirect_config = Zgrab2Scanner.build_command(
                     # FIXME: previously version up to 1.2 for resumption or exactly the previous version?
                     probe="http",
@@ -336,20 +471,6 @@ class Zgrab2Scanner(Scanner):
                     use_session_cache=1,
                     session_cache_dir=cache_dir,
                 )
-            elif version == ScanVersion.TLS1_3:
-                redirect_config = Zgrab2Scanner.build_command(
-                    probe="http",
-                    max_redirects=1,
-                    redirects_succeed=True,
-                    min_version=0x0304,
-                    max_version=0x0304,
-                    port=443,
-                    use_session_cache=1,
-                    session_cache_dir=cache_dir,
-                )
-            else:
-                # FIXME: technically this is implemented, but not tested
-                raise NotImplementedError()
 
             input_string = "".join([f"{target_addr.ip},{domain_from}\n" for target_addr in target_addrs]).encode()
             redirect = subprocess.run(
@@ -357,15 +478,17 @@ class Zgrab2Scanner(Scanner):
                 input=input_string,
                 capture_output=True,
             )
-            result["zgrab_redirect_exitcode"] = redirect.returncode
-            redirect_results = [json.loads(res) for res in redirect.stdout.splitlines()]
-            # TODO SH: filter objects
+            res.redirect_exitcode = redirect.returncode
+            res.status = Zgrab2ResumptionResultStatus.RESUMPTION_RAN
+            redirect_results = [self.filter_result(json.loads(res)) for res in redirect.stdout.splitlines()]
+            res.status = Zgrab2ResumptionResultStatus.RESUMPTION_PARSED
             # HTTP: body_sha, body_title, status_code, location_header
             # del certs
             # TODO SH: persist status line from stderr?
-            result["redirect"] = redirect_results
+            res.redirect = redirect_results
             # newline separated json objects
-            return result
+            res.status = Zgrab2ResumptionResultStatus.SUCCESS
+            return res
 
 
 class IPType(Enum):
@@ -376,7 +499,7 @@ class IPType(Enum):
 _BASE_QUERY = """
 CALL {{
     MATCH (d1:DOMAIN {{domain: $domain}})--(ip1:IP {{ip: $ip}})--(p:PREFIX)--(ip2:{ip_target_type})--(d2:DOMAIN)
-    WHERE ip1<>ip2 AND d1<>d2 AND NOT (d1)-->(ip2)
+    WHERE ip1<>ip2 AND d1<>d2 AND NOT (d1)-->(ip2) AND p.version{v13_equality_operator}"TLSv1.3"
     RETURN DISTINCT [p.version, ip2.ip] as item
 }}
 RETURN *
@@ -391,24 +514,30 @@ class Domain:
 
     def _evaluate_from_ip(self, driver: Driver, scanner: Scanner, source_ip: str):
         with driver.session() as session:
+            _QUERY = []
+            for iptype, is_TLS_13 in product(IPType, [False, True]):
+                _QUERY.append(
+                    _BASE_QUERY.format(ip_target_type=iptype.value, v13_equality_operator="=" if is_TLS_13 else "<>")
+                )
+            _QUERY = " UNION ".join(_QUERY)
             _targets = session.run(
-                _BASE_QUERY.format(ip_target_type=IPType.V4.value)
-                + " UNION "
-                + _BASE_QUERY.format(ip_target_type=IPType.V6.value),
+                _QUERY,
                 domain=self.domain,
                 ip=source_ip,
             )
-            targets_by_version = {}
+            targets_13 = []
+            targets_pre13 = []
             for target in _targets:
                 target_version, target_ip = target[0]
-                if target_version not in targets_by_version:
-                    targets_by_version[target_version] = []
-                targets_by_version[target_version].append(Connectable(target_ip, 443))
+                if target_version == "TLSv1.3":
+                    targets_13.append(Connectable(target_ip, 443))
+                else:
+                    targets_pre13.append(Connectable(target_ip, 443))
 
-        for version, local_targets in targets_by_version.items():
-            scanner.scan(
-                self.domain, Connectable(source_ip, 443), *local_targets, version=ScanVersion.from_name(version)
-            )
+        if targets_13:
+            scanner.scan(self.domain, Connectable(source_ip, 443), targets_13, ScanVersion.TLS1_3)
+        if targets_pre13:
+            scanner.scan(self.domain, Connectable(source_ip, 443), targets_pre13, ScanVersion.PRE_1_3)
 
     def _evaluate_in_iptype(self, driver: Driver, scanner: Scanner, tfrom: IPType):
         if not isinstance(tfrom, IPType):
@@ -470,22 +599,37 @@ def main(parallelize, create_indexes=True, profile=False):
         # prepare indexes
         neo4j_driver.execute_query("CREATE INDEX ip_lookup IF NOT EXISTS FOR (x:IP) ON (x.ip)")
         neo4j_driver.execute_query("CREATE INDEX domain_lookup IF NOT EXISTS FOR (x:DOMAIN) ON (x.domain)")
+        neo4j_driver.execute_query("CREATE INDEX prefix_version_lookup IF NOT EXISTS FOR (x:PREFIX) ON (x.version)")
 
-    mongo_url = f"mongodb://{mongo_user}:{mongo_password}@snhebrok-eval.cs.upb.de:27018/?authSource=admin&readPreference=primary&appname=MongoDB+Compass&directConnection=true&ssl=true"
+    # mongo_url = f"mongodb://{mongo_user}:{mongo_password}@snhebrok-eval.cs.upb.de:27018/?authSource=admin&readPreference=primary&appname=MongoDB+Compass&directConnection=true&ssl=true"
+    mongo_url = f"mongodb://{mongo_user}:{mongo_password}@127.0.0.1:27017/?authSource=admin&readPreference=primary&directConnection=true&ssl=true"
     print(f"Connecting to {mongo_url=}")
-    mongo_driver = MongoClient(mongo_url)
+    mongo_driver = MongoClient(mongo_url, tlsAllowInvalidCertificates=True)
     mongo_driver.server_info()
     print("Connected to MongoDB")
     scanner = Zgrab2Scanner(mongo_driver=mongo_driver)
-    scanner = DummyScanner()
+    # scanner = DummyScanner()  # Test
 
     CLUSTER = None
     LIMIT = None
-    CLUSTER = 374  # Test Cluster (2094 domains)
-    LIMIT = 10000  # Test Limit
-    DOMAINS = set(get_domains(neo4j_driver, CLUSTER, LIMIT))
-    print(f"Fetched {len(DOMAINS)} domains")
+    # MATCH (n:DOMAIN) RETURN n.clusterID, count(n.clusterID) as c ORDER BY c DESC
+    # CLUSTER = 393  # Test Cluster (2094 domains)
+    # LIMIT = 1000  # Test Limit
 
+    if (
+        CLUSTER is not None
+        or LIMIT is not None
+        or isinstance(scanner, DummyScanner)
+        or profile
+        or not parallelize
+        or not create_indexes
+    ):
+        print(f"TEST mode is active: {CLUSTER=}, {LIMIT=}, {scanner=}, {profile=}, {parallelize=}, {create_indexes=}")
+    else:
+        print("Production Mode | gl;hf")
+
+    DOMAINS = set(get_domains(neo4j_driver, CLUSTER, LIMIT))
+    print(f"Fetched {len(DOMAINS)} domains ({CLUSTER=}, {LIMIT=})")
     STATS.start(len(DOMAINS))
 
     if parallelize:
@@ -500,5 +644,5 @@ def main(parallelize, create_indexes=True, profile=False):
 
 
 if __name__ == "__main__":
-    # main(16, True, False)
-    main(False, True, False)
+    main(64, True, False)
+    # main(False, True, False)

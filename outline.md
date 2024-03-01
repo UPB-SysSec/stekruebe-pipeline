@@ -9,8 +9,17 @@
     2. `import_csv.sh`
     3. `generate_wcc.sh`
 3. cluster/sample using `sampling_neo4j.py`
-    - calls `zgrab2 http --use-tls` (2 times)
-    - **TODO** filter stored data
+    - calls `zgrab2 http --use-tls`
+    - for each domain
+        - for all source IPs
+            - sample 10 IPv4 targets in 1.2
+            - sample 10 IPv4 targets in 1.3
+            - sample 10 IPv6 targets in 1.2
+            - sample 10 IPv6 targets in 1.3
+    - number of connections is at most `(domains*sourceIPs)*40`
+        - `domains` is 825896 (cf `MATCH (n:DOMAIN) RETURN COUNT(n)` in neo4j)
+        - `sourceIPs` is 2.25 on average (cf resolve_stats.py)
+        - -> ca 74_330_640 connections (NB: this is not exact, as the sourceIPs stat was created over all 1M domains)
 4. distinguish cases
     - no resumption -> safe
     - resumed
