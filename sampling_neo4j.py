@@ -279,8 +279,10 @@ class Zgrab2ResumptionResult:
     error: str = None
     initial: dict = None
     initial_exitcode: int = None
+    initial_status_line: dict = None
     redirect: list[dict] = None
     redirect_exitcode: int = None
+    redirect_status_line: dict = None
 
     def _json_default(self, o):
         if isinstance(o, Enum):
@@ -294,10 +296,12 @@ class Zgrab2ResumptionResult:
 
 ZGRAB2_FILTER = JsonFilter(
     "data.http.result.*",
-    "!data.http.result.response.body_sha256",
+    "!data.http.result.response.status_code",
+    "!data.http.result.response.status_line",
     "!data.http.result.response.headers",
-    "!data.http.result.response.content_title",
+    "!data.http.result.response.body_sha256",
     "!data.http.result.response.content_length",
+    "!data.http.result.response.content_title",
     "!data.http.result.response.request.tls_log",
     "*.handshake_log.server_certificates.*.parsed",
 )
@@ -391,6 +395,12 @@ class Zgrab2Scanner(Scanner):
             pass
         return ZGRAB2_FILTER(result)
 
+    def _parse_status_line(self, process):
+        try:
+            return json.loads(process.stderr.decode().strip().split("\n")[-1])
+        except:
+            return {"error": "failed to parse", "raw": repr(process.stderr), "traceback": traceback.format_exc()}
+
     def _scan(
         self,
         domain_from: str,
@@ -408,7 +418,7 @@ class Zgrab2Scanner(Scanner):
             if version == ScanVersion.TLS1_3:
                 initial_config = Zgrab2Scanner.build_command(
                     probe="http",
-                    max_redirects=1,
+                    max_redirects=0,
                     redirects_succeed=True,
                     min_version=0x0304,
                     max_version=0x0304,
@@ -433,6 +443,7 @@ class Zgrab2Scanner(Scanner):
                 capture_output=True,
             )
             res.initial_exitcode = initial.returncode
+            res.initial_status_line = self._parse_status_line(initial)
             res.status = Zgrab2ResumptionResultStatus.INITIAL_RAN
 
             res.initial = self.filter_result(json.loads(initial.stdout))
@@ -451,7 +462,7 @@ class Zgrab2Scanner(Scanner):
             if version == ScanVersion.TLS1_3:
                 redirect_config = Zgrab2Scanner.build_command(
                     probe="http",
-                    max_redirects=1,
+                    max_redirects=0,
                     redirects_succeed=True,
                     min_version=0x0304,
                     max_version=0x0304,
@@ -463,7 +474,7 @@ class Zgrab2Scanner(Scanner):
                 redirect_config = Zgrab2Scanner.build_command(
                     # FIXME: previously version up to 1.2 for resumption or exactly the previous version?
                     probe="http",
-                    max_redirects=1,
+                    max_redirects=0,
                     redirects_succeed=True,
                     min_version=initial_version_key,
                     max_version=0x0303,
@@ -479,6 +490,7 @@ class Zgrab2Scanner(Scanner):
                 capture_output=True,
             )
             res.redirect_exitcode = redirect.returncode
+            res.redirect_status_line = self._parse_status_line(redirect)
             res.status = Zgrab2ResumptionResultStatus.RESUMPTION_RAN
             redirect_results = [self.filter_result(json.loads(res)) for res in redirect.stdout.splitlines()]
             res.status = Zgrab2ResumptionResultStatus.RESUMPTION_PARSED
@@ -643,6 +655,13 @@ def main(parallelize, create_indexes=True, profile=False):
             domain.evaluate(neo4j_driver, scanner)
 
 
+def test(domain: str):
+    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=(neo4j_user, neo4j_password))
+    scanner = DummyScanner()  # Test
+    Domain(domain).evaluate(neo4j_driver, scanner)
+
+
 if __name__ == "__main__":
+    # test("latam.com")
     main(64, True, False)
     # main(False, True, False)

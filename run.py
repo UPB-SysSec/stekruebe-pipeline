@@ -876,8 +876,11 @@ if __name__ == "__main__":
     )
     if len(sys.argv) > 1:
         FILES.TRANCO = sys.argv[1]
+    n_lines = None
+    if len(sys.argv) > 2:
+        n_lines = int(sys.argv[2])
     # main(10, False)
     # main(None, True)
-    main()
+    main(n_lines)
     # test_zdns()
     # test_zgrab()
