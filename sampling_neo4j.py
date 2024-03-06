@@ -273,8 +273,8 @@ class ZgrabHelper:
 class Zgrab2ResumptionResult:
     domain_from: str
     addr_from: Connectable
-    target_addrs: list[Connectable]
     version: ScanVersion
+    target_addrs: list[Connectable]
     status: Zgrab2ResumptionResultStatus
     error: str = None
     initial: dict = None
@@ -305,7 +305,12 @@ ZGRAB2_FILTER = JsonFilter(
     "!data.http.result.response.request.tls_log",
     "*.handshake_log.server_certificates.*.parsed",
 )
-TITLE_RE = re.compile(r"<title>(.*)</title>")
+TITLE_RE = re.compile(r"<title[^>]*>(.*)</title>", re.IGNORECASE | re.DOTALL)
+
+assert TITLE_RE.search("<title>test</title>").group(1) == "test"
+assert TITLE_RE.search("asd <titLe>test</titLe>").group(1) == "test"
+assert TITLE_RE.search('asd <titLe foo="bar">test</titLe>').group(1) == "test"
+assert TITLE_RE.search('asd <titLe foo="bar">\ntest\n</titLe>').group(1) == "\ntest\n"
 
 
 class Zgrab2Scanner(Scanner):
@@ -353,6 +358,9 @@ class Zgrab2Scanner(Scanner):
         if use_session_cache and session_cache_dir is not None:
             cmd.append(f"--session-cache-dir={session_cache_dir}")
 
+        cmd.append("--user-agent=Mozilla/5.0 zgrab/fork-tls1.3")
+        cmd.append("--senders=1")  # throttle ourselves a bit. We are running multithreaded anyways.
+
         return cmd
 
     def __init__(
@@ -364,6 +372,10 @@ class Zgrab2Scanner(Scanner):
         self.mongo_driver = mongo_driver
         self.mongo_db = mongo_driver[db_name]
         self.mongo_collection = self.mongo_db[collection_name]
+        self.mongo_collection.create_index("domain_from")
+        self.mongo_collection.create_index("addr_from")
+        self.mongo_collection.create_index("version")
+        self.mongo_collection.create_index("status")
 
     def scan(self, domain_from: str, addr_from: Connectable, target_addrs: list[Connectable], version):
         """
@@ -371,7 +383,11 @@ class Zgrab2Scanner(Scanner):
         It calls into the implementation _scan and is mainly responsible for persisting the results.
         """
         res = Zgrab2ResumptionResult(
-            domain_from, addr_from, target_addrs, version, Zgrab2ResumptionResultStatus.PENDING
+            domain_from=domain_from,
+            addr_from=addr_from,
+            target_addrs=target_addrs,
+            version=version,
+            status=Zgrab2ResumptionResultStatus.PENDING,
         )
         try:
             _res = self._scan(domain_from, addr_from, target_addrs, version, res)
@@ -415,27 +431,19 @@ class Zgrab2Scanner(Scanner):
         # get ticket for domain_from
         input_string = f"{addr_from.ip},{domain_from},\n".encode()
         with tempfile.TemporaryDirectory() as cache_dir:
-            if version == ScanVersion.TLS1_3:
-                initial_config = Zgrab2Scanner.build_command(
-                    probe="http",
-                    max_redirects=0,
-                    redirects_succeed=True,
-                    min_version=0x0304,
-                    max_version=0x0304,
-                    port=443,
-                    use_session_cache=2,
-                    session_cache_dir=cache_dir,
-                )
-            else:
-                initial_config = Zgrab2Scanner.build_command(
-                    probe="tls",
-                    force_session_tickets=True,
-                    min_version=0x0301,
-                    max_version=0x0303,
-                    port=443,
-                    use_session_cache=2,
-                    session_cache_dir=cache_dir,
-                )
+            min_version = 0x0301 if version != ScanVersion.TLS1_3 else 0x0304
+            max_version = 0x0303 if version != ScanVersion.TLS1_3 else 0x0304
+            initial_config = Zgrab2Scanner.build_command(
+                probe="http",
+                max_redirects=0,
+                redirects_succeed=True,
+                force_session_tickets=version != ScanVersion.TLS1_3,
+                min_version=min_version,
+                max_version=max_version,
+                port=443,
+                use_session_cache=2,
+                session_cache_dir=cache_dir,
+            )
 
             initial = subprocess.run(
                 initial_config,
@@ -459,29 +467,17 @@ class Zgrab2Scanner(Scanner):
                 res.status = Zgrab2ResumptionResultStatus.INITIAL_NO_TICKET
                 return res
 
-            if version == ScanVersion.TLS1_3:
-                redirect_config = Zgrab2Scanner.build_command(
-                    probe="http",
-                    max_redirects=0,
-                    redirects_succeed=True,
-                    min_version=0x0304,
-                    max_version=0x0304,
-                    port=443,
-                    use_session_cache=1,
-                    session_cache_dir=cache_dir,
-                )
-            else:
-                redirect_config = Zgrab2Scanner.build_command(
-                    # FIXME: previously version up to 1.2 for resumption or exactly the previous version?
-                    probe="http",
-                    max_redirects=0,
-                    redirects_succeed=True,
-                    min_version=initial_version_key,
-                    max_version=0x0303,
-                    port=443,
-                    use_session_cache=1,
-                    session_cache_dir=cache_dir,
-                )
+            min_version = initial_version_key
+            redirect_config = Zgrab2Scanner.build_command(
+                probe="http",
+                max_redirects=0,
+                redirects_succeed=True,
+                min_version=min_version,
+                max_version=max_version,
+                port=443,
+                use_session_cache=1,
+                session_cache_dir=cache_dir,
+            )
 
             input_string = "".join([f"{target_addr.ip},{domain_from}\n" for target_addr in target_addrs]).encode()
             redirect = subprocess.run(
@@ -496,7 +492,6 @@ class Zgrab2Scanner(Scanner):
             res.status = Zgrab2ResumptionResultStatus.RESUMPTION_PARSED
             # HTTP: body_sha, body_title, status_code, location_header
             # del certs
-            # TODO SH: persist status line from stderr?
             res.redirect = redirect_results
             # newline separated json objects
             res.status = Zgrab2ResumptionResultStatus.SUCCESS
@@ -510,8 +505,8 @@ class IPType(Enum):
 
 _BASE_QUERY = """
 CALL {{
-    MATCH (d1:DOMAIN {{domain: $domain}})--(ip1:IP {{ip: $ip}})--(p:PREFIX)--(ip2:{ip_target_type})--(d2:DOMAIN)
-    WHERE ip1<>ip2 AND d1<>d2 AND NOT (d1)-->(ip2) AND p.version{v13_equality_operator}"TLSv1.3"
+    MATCH (d1:DOMAIN {{domain: $domain}})--(ip1:IP {{ip: $ip}})--(p:PREFIX)--(ip2:{ip_target_type}), (d1)--(p)
+    WHERE ip1<>ip2 AND NOT (d1)-->(ip2) AND p.version{v13_equality_operator}"TLSv1.3"
     RETURN DISTINCT [p.version, ip2.ip] as item
 }}
 RETURN *
@@ -661,7 +656,21 @@ def test(domain: str):
     Domain(domain).evaluate(neo4j_driver, scanner)
 
 
+def test_with_zgrab(domain: str):
+    class FakeMongoDriver:
+        def __getitem__(self, key):
+            return self
+
+        def insert_one(self, data):
+            print(data)
+
+    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=(neo4j_user, neo4j_password))
+    scanner = Zgrab2Scanner(mongo_driver=FakeMongoDriver())
+    Domain(domain).evaluate(neo4j_driver, scanner)
+
+
 if __name__ == "__main__":
     # test("latam.com")
+    # test_with_zgrab("latam.com")
     main(64, True, False)
     # main(False, True, False)
