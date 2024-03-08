@@ -1,5 +1,4 @@
 import abc
-import json
 import subprocess
 import sys
 import tempfile
@@ -14,26 +13,12 @@ from pymongo import MongoClient
 from threading import Thread
 import inspect
 import traceback
-from json_filter import Filter as JsonFilter
-import re
+from utils import JsonFilter
 from itertools import product
-
-with open("neo4j/credentials") as f:
-    neo4j_user, neo4j_password = f.read().strip().split(":")
-with open("mongo/credentials") as f:
-    mongo_user, mongo_password = f.read().strip().split(":")
-
-
-@dataclass(frozen=True)
-class Connectable:
-    ip: str
-    port: int
-
-    def __str__(self):
-        return f"{self.ip}:{self.port}"
-
-    def __repr__(self) -> str:
-        return f"<Connectable {self.ip!r}:{self.port!r}>"
+from utils.credentials import mongodb_creds, neo4j_creds
+from utils import json_serialization as json
+from utils.result import Connectable, Zgrab2ResumptionResult, ScanVersion, Zgrab2ResumptionResultStatus
+from utils.misc import extract_title
 
 
 @dataclass
@@ -182,19 +167,6 @@ class _ProfileDriver:
         return _ProfileSession(self._stats, self._driver.session(), self._profile)
 
 
-class ScanVersion(Enum):
-    TLS1_0 = "0x0301"
-    TLS1_1 = "0x0302"
-    TLS1_2 = "0x0303"
-    TLS1_3 = "0x0304"
-    PRE_1_3 = "_custom_"
-
-    @classmethod
-    def from_name(cls, name: str):
-        # TLSv1.3 -> TLS1_3
-        return cls[name.replace("v", "").replace(".", "_")]
-
-
 class Scanner(abc.ABC):
     @abc.abstractmethod
     def scan(self, domain_from: str, addr_from: Connectable, target_addrs: list[Connectable], version):
@@ -206,17 +178,6 @@ class DummyScanner(Scanner):
     def scan(self, domain_from: str, addr_from: Connectable, target_addrs: list[Connectable], version):
         print(f"Scanning {domain_from} from {addr_from} to {len(target_addrs)} targets on version {version.name}")
         STATS.done_targets(len(target_addrs))
-
-
-class Zgrab2ResumptionResultStatus(Enum):
-    PENDING = "pending"
-    INITIAL_RAN = "initial_ran"
-    INITIAL_PARSED = "initial_parsed"
-    INITIAL_NO_TICKET = "initial_no_ticket"
-    INITIAL_NO_VERSION = "initial_no_version"
-    RESUMPTION_RAN = "resumption_ran"
-    RESUMPTION_PARSED = "resumption_parsed"
-    SUCCESS = "success"
 
 
 class ZgrabHelper:
@@ -269,31 +230,6 @@ class ZgrabHelper:
             return None
 
 
-@dataclass
-class Zgrab2ResumptionResult:
-    domain_from: str
-    addr_from: Connectable
-    version: ScanVersion
-    target_addrs: list[Connectable]
-    status: Zgrab2ResumptionResultStatus
-    error: str = None
-    initial: dict = None
-    initial_exitcode: int = None
-    initial_status_line: dict = None
-    redirect: list[dict] = None
-    redirect_exitcode: int = None
-    redirect_status_line: dict = None
-
-    def _json_default(self, o):
-        if isinstance(o, Enum):
-            return o.name
-        return o.__dict__
-
-    def to_dict(self):
-        # dirty way to convert to
-        return json.loads(json.dumps(self, default=self._json_default))
-
-
 ZGRAB2_FILTER = JsonFilter(
     "data.http.result.*",
     "!data.http.result.response.status_code",
@@ -305,12 +241,6 @@ ZGRAB2_FILTER = JsonFilter(
     "!data.http.result.response.request.tls_log",
     "*.handshake_log.server_certificates.*.parsed",
 )
-TITLE_RE = re.compile(r"<title[^>]*>(.*)</title>", re.IGNORECASE | re.DOTALL)
-
-assert TITLE_RE.search("<title>test</title>").group(1) == "test"
-assert TITLE_RE.search("asd <titLe>test</titLe>").group(1) == "test"
-assert TITLE_RE.search('asd <titLe foo="bar">test</titLe>').group(1) == "test"
-assert TITLE_RE.search('asd <titLe foo="bar">\ntest\n</titLe>').group(1) == "\ntest\n"
 
 
 class Zgrab2Scanner(Scanner):
@@ -403,10 +333,7 @@ class Zgrab2Scanner(Scanner):
         try:
             body = result["data"]["http"]["result"]["response"]["body"]
             # extract title from html body
-            title = TITLE_RE.search(body)
-            if title is not None:
-                title = title.group(1)
-            result["data"]["http"]["result"]["response"]["content_title"] = title
+            result["data"]["http"]["result"]["response"]["content_title"] = title = extract_title(body)
         except KeyError:
             pass
         return ZGRAB2_FILTER(result)
@@ -596,7 +523,7 @@ def print_dummy_query():
 def main(parallelize, create_indexes=True, profile=False):
     # print_dummy_query()
 
-    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=(neo4j_user, neo4j_password))
+    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=neo4j_creds.as_tuple())
     if profile:
         neo4j_driver = _ProfileDriver(STATS, neo4j_driver, profile)
 
@@ -609,7 +536,7 @@ def main(parallelize, create_indexes=True, profile=False):
         neo4j_driver.execute_query("CREATE INDEX prefix_version_lookup IF NOT EXISTS FOR (x:PREFIX) ON (x.version)")
 
     # mongo_url = f"mongodb://{mongo_user}:{mongo_password}@snhebrok-eval.cs.upb.de:27018/?authSource=admin&readPreference=primary&appname=MongoDB+Compass&directConnection=true&ssl=true"
-    mongo_url = f"mongodb://{mongo_user}:{mongo_password}@127.0.0.1:27017/?authSource=admin&readPreference=primary&directConnection=true&ssl=true"
+    mongo_url = f"mongodb://{mongodb_creds.as_str()}@127.0.0.1:27017/?authSource=admin&readPreference=primary&directConnection=true&ssl=true"
     print(f"Connecting to {mongo_url=}")
     mongo_driver = MongoClient(mongo_url, tlsAllowInvalidCertificates=True)
     mongo_driver.server_info()
@@ -651,7 +578,7 @@ def main(parallelize, create_indexes=True, profile=False):
 
 
 def test(domain: str):
-    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=(neo4j_user, neo4j_password))
+    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=neo4j_creds.as_tuple())
     scanner = DummyScanner()  # Test
     Domain(domain).evaluate(neo4j_driver, scanner)
 
@@ -664,7 +591,7 @@ def test_with_zgrab(domain: str):
         def insert_one(self, data):
             print(data)
 
-    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=(neo4j_user, neo4j_password))
+    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=neo4j_creds.as_tuple())
     scanner = Zgrab2Scanner(mongo_driver=FakeMongoDriver())
     Domain(domain).evaluate(neo4j_driver, scanner)
 

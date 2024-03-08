@@ -10,7 +10,7 @@ fi
 
 echo "Gathering Tickets"
 
-python3 run.py tranco_XJJ9N.csv 100000
+python3 1_gather_tickets.py tranco_XJJ9N.csv 100000
 
 cd neo4j
 docker stop steckruebe-graph-database || true
@@ -27,6 +27,7 @@ echo "Generating Clusters"
 cd ..
 
 echo "Running Scan (Sampling Neo4j)"
-python3 sampling_neo4j.py
+python3 2_perform_redirection.py
 
-# TODO: evaluate results from mongodb
+# echo "Running Evaluation"
+# python3 3_evaluate.py
