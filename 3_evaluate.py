@@ -20,6 +20,7 @@ class Response:
         self.resumed = "server_certificates" not in self._handshake_log
         self.status_code = self._response.get("status_code", -1)
         self.body_sha256 = self._response.get("body_sha256", None)
+        self.body = self._response.get("body", None)
         self.content_title = self._response.get("content_title", None)
         self.content_length = self._response.get("content_length", None)
         self.location = self._response.get("headers", {}).get("location", [])
@@ -129,6 +130,8 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
     if resumption.status_code == 502:
         return ResumptionClassification.not_applicable("resumption not routed")
     if resumption.status_code == 525:
+        # 525 SSL handshake failed
+        # (via https???)
         return ResumptionClassification.not_applicable(
             "resumption failed on HTTP layer"
         )
@@ -141,13 +144,16 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
             "resumption got 404 - with no content at all"
         )
 
+    # initially we were redirected ...
     if initial.status_code in range(300, 400):
         assert initial.location
         if resumption.status_code in range(300, 400):
             assert resumption.location
+            # ... on resumption as well - was the location the same?
             return ResumptionClassification.assert_equal(
                 initial.location, resumption.location, "location"
             )
+        # ... but not on resumption - which means the server is handling us differently
         return ResumptionClassification.unsafe(
             "initial was redirect, resumption was not",
             initial.status_code,
@@ -176,35 +182,70 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
         return ResumptionClassification.assert_equal(
             initial.content_title, resumption.content_title, "title"
         )
-    if initial.status_code in range(200, 300) and resumption.status_code in range(400, 500):
-        return ResumptionClassification.unsafe("no content, but from success to error on redirected")
-    if initial.status_code in range(400, 500) and resumption.status_code in range(200, 300):
-        return ResumptionClassification.unsafe("no content, but from error to success on redirected")
 
-    if (initial.content_title is not None and resumption.content_title is None):
-        return ResumptionClassification.assert_equal(initial.status_code, resumption.status_code, "compare statuscode when redirected from content to title-less with different statuscode")
-    if (initial.content_title is None and resumption.content_title is not None):
-        return ResumptionClassification.assert_equal(initial.status_code, resumption.status_code, "compare statuscode when redirected from title-less to content with different statuscode")
+    # only one of initial/resumption has a title - does the status code change?
+    if initial.content_title is not None and resumption.content_title is None:
+        return ResumptionClassification.assert_equal(
+            initial.status_code,
+            resumption.status_code,
+            "compare statuscode when redirected from content to title-less with different statuscode",
+        )
+    if initial.content_title is None and resumption.content_title is not None:
+        return ResumptionClassification.assert_equal(
+            initial.status_code,
+            resumption.status_code,
+            "compare statuscode when redirected from title-less to content with different statuscode",
+        )
 
-    if initial.content_title is None and resumption.content_title is None:
-            if initial.body_sha256 is None and resumption.body_sha256 is None:
-                # both of them do not send any content to work with
-                return ResumptionClassification.assert_equal(
-                    initial.status_code,
-                    resumption.status_code,
-                    "status code if completely empty",
-                )
-            if initial.content_length in [None, -1] and resumption.content_length in [None, -1]:
-                # the server does
-                return ResumptionClassification.assert_equal(
-                    initial.status_code,
-                    resumption.status_code,
-                    "compare status code when both are not supposed to have content",
-                )
-            if initial.status_code == resumption.status_code:
-                if initial.status_code in range(400, 500) and initial.content_length == resumption.content_length:
-                    # no real (title) content, but both error, same length is pretty safe
-                    return ResumptionClassification.safe("untitled but same format error message")
+    # WE DO NOT HAVE ANY CONTENT TITLE TO GO OFF OF
+
+    assert initial.content_title is None and resumption.content_title is None
+    # status code changed from okayish to error or the other way around -> thats clearly suspicious
+    if initial.status_code in range(200, 300) and resumption.status_code in range(
+        400, 500
+    ):
+        return ResumptionClassification.unsafe(
+            "no titles, but from success to error on resumption"
+        )
+    if initial.status_code in range(400, 500) and resumption.status_code in range(
+        200, 300
+    ):
+        return ResumptionClassification.unsafe(
+            "no contetitles, but from error to success on resumption"
+        )
+
+    if initial.status_code in range(400, 500):
+        return ResumptionClassification.not_applicable(
+            "Initial was error, title and body failed us"
+        )
+
+    if (
+        initial.content_length
+        and resumption.content_length
+        and initial.content_length != resumption.content_length
+    ):
+        return ResumptionClassification.unsafe("no titles, but unequal length contents")
+
+    if initial.status_code != resumption.status_code:
+        # there really was literally nothing besides status code - did it change?
+        if initial.body_sha256 is None and resumption.body_sha256 is None:
+            return ResumptionClassification.not_applicable(
+                "different status code when completely empty",
+                initial.status_code,
+                resumption.status_code,
+            )
+
+    else:
+        # nothing really changed, the content is not really telling, but it was an same length error -> pretty likely an error message
+        assert initial.status_code == resumption.status_code
+        if (
+            initial.status_code in range(400, 500)
+            and initial.content_length == resumption.content_length
+        ):
+            # no real (title) content, but both error, same length is pretty safe
+            return ResumptionClassification.safe(
+                "untitled but same format error message"
+            )
 
     # TODO decide here...
     return ResumptionClassification.unsafe("unsure")
@@ -304,7 +345,7 @@ def main():
     mongo_driver.server_info()
     print("Connected to MongoDB")
     db = mongo_driver["steckruebe"]
-    collection_name = "ticket_redirection_2024-03-06 17:11:59.868281"
+    collection_name = "ticket_redirection_2024-03-27 17:15:29.248293"
     if collection_name:
         analyze_collection(db[collection_name])
     else:
