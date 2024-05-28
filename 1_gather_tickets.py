@@ -575,7 +575,10 @@ class FILES:
 ZGRAB_FILTER = JsonFilter(
     "data.https-tls1_3.result.*",
     "!data.https-tls1_3.result.response.request.tls_log",
-    "*.handshake_log.server_certificates.*.parsed",
+    "data.https-tls1_0-1_2.result.*",
+    "!data.https-tls1_0-1_2.result.response.request.tls_log",
+    # "*.handshake_log.server_certificates.*.parsed",
+    "*.handshake_log.server_certificates.chain.parsed",
 )
 
 
