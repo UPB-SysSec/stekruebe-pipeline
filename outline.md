@@ -26,7 +26,18 @@
         - shows original website -> ok
         - redirects to original website -> ok
         - shows other website -> insecure
-
+    - **TODO** levenshtein (via neo4j neighbors)
+        - if levenshtein found another same webiste: check cert of that website
+        - e.g.
+            - initial upb.de (ip Y) -> cert1
+                - 301
+            - resumption on ip X (uni-paderborn.de)
+                - 200
+            - -> Unsafe
+            - levenstein says resumption is uni-paderborn.de
+            - get uni-paderborn.de -> cert2 -> fp(cert1) == fp(cert2)
+            - explain this very well in eventual paper: if levenshtein classifies the resumption as foo.com we check that the initial had the same cert
+                - we want to compare the initial cert with the cert we would've gotten without a ticket at the resumption host
 Determining if same website
 
 - both  200: check same title/body
@@ -34,3 +45,6 @@ Determining if same website
 - 200 + 3xx: check location header to ticket issuer
 
 _IF_ we notice that redirection has different statistics in 1.3 and 1.2, we need to change scanning procedure; Then we want to behave similar to IPv4 vs IPv6.
+
+***TODO*** for each cert, ensure that we requested each SAN once
+-> more bodies
