@@ -65,6 +65,7 @@ OUTPUTS = TypeVar("OUTPUTS")
 class _Stats:
     def __init__(self, filename: str):
         self.filename = filename
+        self.existing_keys = set()
 
     def store(self, stage_name: str, name: str, data: Any):
         with open(self.filename, "a", newline="") as f:
@@ -232,6 +233,58 @@ class ZDNS(SimpleSubprocessStage):
         self._store_stat("both_v4_and_v6", both)
         return ret
 
+class ZMAP4(SimpleSubprocessStage):
+    def __init__(self, stats, *args, name_overwrite="ZMAP4", **kwargs) -> None:
+        super().__init__(name_overwrite, stats, *args, **kwargs)
+
+    def run_stage(self, blocklist=None, allowlist=None) -> list[str]:
+        # dynamically overwrite blocklist and allowlist by changing args following -b and -w respectively
+        
+        # FIXME: This is dirty but should be good enough for now (LAST WORDS OF A LAZY PROGRAMMER)
+        new_args = list(self.args)
+        if blocklist:
+            if "-b" not in new_args:
+                new_args.append("-b")
+            new_args[new_args.index("-b") + 1] = str(blocklist)
+        if allowlist:
+            if "-w" not in new_args:
+                new_args.append("-w")
+            new_args[new_args.index("-w") + 1] = str(allowlist)
+        self.args = new_args
+        # zmap fails loudly if allow list is empty, so we need to check for that
+        if "-w" in self.args:
+            allowlist = self.args[self.args.index("-w") + 1]
+            # if file has any lines we proceed
+            with open(allowlist) as f:
+                if len(f.readlines()) == 0:
+                    self.logger.warning(f"Allowlist {allowlist} is empty. Skipping.")
+                    return []
+
+        start = time.time()
+        ret = super().run_stage()
+        end = time.time()
+        self._store_stat("zmap4 runtime", end - start)
+        return ret
+
+class ZMAP6(SimpleSubprocessStage):
+    def __init__(self, stats, *args, name_overwrite="ZMAP6", **kwargs) -> None:
+        super().__init__(name_overwrite, stats, *args, **kwargs)
+
+    def run_stage(self, targets=None) -> list[str]:
+        # dynamically overwrite targets by changing args following --ipv6-target-file
+        # FIXME: This is dirty but should be good enough for now (LAST WORDS OF A LAZY PROGRAMMER)
+        new_args = list(self.args)
+        if targets:
+            if "--ipv6-target-file" not in new_args:
+                new_args.append("--ipv6-target-file")
+            new_args[new_args.index("--ipv6-target-file") + 1] = str(targets)
+        self.args = new_args
+
+        start = time.time()
+        ret = super().run_stage()
+        end = time.time()
+        self._store_stat("zmap6 runtime", end - start)
+        return ret
 
 class BlocklistFilter(CacheableStage[list[str]]):
     def __init__(self, name, stats: _Stats, blocklist_file) -> None:
@@ -613,8 +666,8 @@ if not op.isdir("out"):
     os.mkdir("out")
 
 
-class FILES(str, Enum):
-    TRANCO = "tranco_head.csv"
+class FILES:
+    TRANCO = "tranco_LJ7W4.csv"
     BLOCKLIST_4 = "/data/Crawling-Blacklist/blacklist.txt"
     BLOCKLIST_6 = "/data/Crawling-Blacklist/blacklist-ipv6.txt"
 
@@ -634,12 +687,10 @@ class FILES(str, Enum):
     ZGRAB_OUT = "out/6_zgrab.json"
     ZGRAB_MERGED_OUT = "out/7_merged_zgrab.json"
 
-    def __str__(self):
-        return self.value
-
-    def __getitem__(self, item):
-        # so that FILES.TRANCO[0] returns the string tranco_head.r0.csv for multiple iterations of a cached stage
-        return self.value.replace(".", f".r{item}.")
+    def get(item, RUN_ID=None):
+        if RUN_ID is None:
+            return getattr(FILES, item)
+        return getattr(FILES, item).replace(".", f".r{RUN_ID}.")
 
 
 ZGRAB_FILTER = JsonFilter(
@@ -670,21 +721,19 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
         DUPLICATE_DOMAINS = DuplicateDomainFilter(stats)
         JQ4 = SimpleSubprocessStage("JQ4", stats, EXEUTABLES.JQ, "-r", ".data.ipv4_addresses | select(. != null) | .[]")
         JQ6 = SimpleSubprocessStage("JQ6", stats, EXEUTABLES.JQ, "-r", ".data.ipv6_addresses | select(. != null) | .[]")
-        BLOCKLIST4 = BlocklistFilter("Blocklist4", stats, FILES.BLOCKLIST_4)
-        BLOCKLIST6 = BlocklistFilter("Blocklist6", stats, FILES.BLOCKLIST_6)
-        ZMAP4 = SimpleSubprocessStage(
-            "ZMAP4",
+        BLOCKLIST4 = BlocklistFilter("Blocklist4", stats, FILES.get("BLOCKLIST_4"))
+        BLOCKLIST6 = BlocklistFilter("Blocklist6", stats, FILES.get("BLOCKLIST_6"))
+        ZMAP4 = ZMAP4(
             stats,
             EXEUTABLES.ZMAP4,
             "-b",
-            FILES.BLOCKLIST_4,
+            str(FILES.get("BLOCKLIST_4")),
             "-p",
             "443",
             "-w",
-            FILES.FILTERED_4_IPLIST,  # this changes on each run
+            str(FILES.get("FILTERED_4_IPLIST")),  # this changes on each run
         )
-        ZMAP6 = SimpleSubprocessStage(
-            "ZMAP6",
+        ZMAP6 = ZMAP6(
             stats,
             EXEUTABLES.ZMAP6,
             "-M",
@@ -694,7 +743,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             "--ipv6-source-ip",
             CONST.IPv6SRC,
             "--ipv6-target-file",
-            FILES.FILTERED_6_IPLIST,  # this changes on each run
+            str(FILES.get("FILTERED_6_IPLIST")),  # this changes on each run
         )
         MERGE_UNIQ = MergeUniq(stats)
         MAP_IPS_TO_DOMAINS = MapIPsToDomains(stats)
@@ -719,34 +768,38 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
 
     # do while new_sans is not empty
     while True:
+        logging.info(f"Starting run {RUN_ID}")
+        stats.store(__name__, "run_id", RUN_ID)
         unique_domains = STAGES.DUPLICATE_DOMAINS(domains)
         resolved_hosts = STAGES.ZDNS(
-            input_string_list=unique_domains, cache_file=FILES.RESOLVED_DOMAINS[RUN_ID], dry_run=DRY_RUN
+            input_string_list=unique_domains, cache_file=FILES.get("RESOLVED_DOMAINS", RUN_ID), dry_run=DRY_RUN
         )
 
-        IPv4s = STAGES.JQ4(resolved_hosts, cache_file=FILES.RESOLVED_IPS4[RUN_ID])
-        IPv6s = STAGES.JQ6(resolved_hosts, cache_file=FILES.RESOLVED_IPS6[RUN_ID])
+        IPv4s = STAGES.JQ4(resolved_hosts, cache_file=FILES.get("RESOLVED_IPS4", RUN_ID))
+        IPv6s = STAGES.JQ6(resolved_hosts, cache_file=FILES.get("RESOLVED_IPS6", RUN_ID))
 
-        IPv4s = STAGES.BLOCKLIST4(IPv4s, cache_file=FILES.FILTERED_4_IPLIST[RUN_ID])
-        IPv6s = STAGES.BLOCKLIST6(IPv6s, cache_file=FILES.FILTERED_6_IPLIST[RUN_ID])
+        IPv4s = STAGES.BLOCKLIST4(IPv4s, cache_file=FILES.get("FILTERED_4_IPLIST", RUN_ID))
+        IPv6s = STAGES.BLOCKLIST6(IPv6s, cache_file=FILES.get("FILTERED_6_IPLIST", RUN_ID))
 
-        IPv4s = STAGES.ZMAP4(cache_file=FILES.HTTPS_4_IPLIST[RUN_ID], dry_run=DRY_RUN)
-        IPv6s = STAGES.ZMAP6(cache_file=FILES.HTTPS_6_IPLIST[RUN_ID], dry_run=DRY_RUN)
+        IPv4s = STAGES.ZMAP4(allowlist=FILES.get("FILTERED_4_IPLIST", RUN_ID), cache_file=FILES.get("HTTPS_4_IPLIST", RUN_ID), dry_run=DRY_RUN)
+        IPv6s = STAGES.ZMAP6(targets=FILES.get("FILTERED_6_IPLIST", RUN_ID), cache_file=FILES.get("HTTPS_6_IPLIST", RUN_ID), dry_run=DRY_RUN)
 
-        IPs = STAGES.MERGE_UNIQ(IPv4s, IPv6s, cache_file=FILES.MERGED_IP_LIST[RUN_ID])
+        IPs = STAGES.MERGE_UNIQ(IPv4s, IPv6s, cache_file=FILES.get("MERGED_IP_LIST", RUN_ID))
         del IPv4s, IPv6s
 
         ip_and_hosts = STAGES.MAP_IPS_TO_DOMAINS(
-            resolved_hosts, IPs, cache_file=FILES.MERGED_HOST_LIST[RUN_ID], dry_run=DRY_RUN
+            resolved_hosts, IPs, cache_file=FILES.get("MERGED_HOST_LIST", RUN_ID), dry_run=DRY_RUN
         )
         del resolved_hosts
         if not DRY_RUN:
-            STAGES.ZGRAB(ip_and_hosts=ip_and_hosts, output_file=FILES.ZGRAB_OUT[RUN_ID])
+            STAGES.ZGRAB(ip_and_hosts=ip_and_hosts, output_file=FILES.get("ZGRAB_OUT", RUN_ID))
 
-        new_sans = STAGES.EXTRACT_NEW_SANS(FILES.ZGRAB_OUT[RUN_ID])
-        STAGES.PP_ZGRAB(FILES.ZGRAB_OUT[RUN_ID], FILES.ZGRAB_MERGED_OUT[RUN_ID])
+        new_sans = STAGES.EXTRACT_NEW_SANS(FILES.get("ZGRAB_OUT", RUN_ID))
+        STAGES.PP_ZGRAB(FILES.get("ZGRAB_OUT", RUN_ID), FILES.get("ZGRAB_MERGED_OUT", RUN_ID))
         if not new_sans:
             break
+        domains = new_sans
+        RUN_ID += 1
 
 
 def test_zdns():
@@ -829,7 +882,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 2:
         n_lines = int(sys.argv[2])
     # main(10, False)
-    main(None, None)
-    # main(n_lines)
+    # # main(None, None)
+    main(n_lines)
     # test_zdns()
     # test_zgrab()
