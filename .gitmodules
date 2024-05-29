@@ -1,0 +1,6 @@
+[submodule "zcrypto"]
+	path = zcrypto
+	url = ssh://irb-git@git.cs.uni-paderborn.de:2222/syssec/projects/steckruebe/zcrypto.git
+[submodule "zgrab2-src"]
+	path = zgrab2-src
+	url = ssh://irb-git@git.cs.uni-paderborn.de:2222/syssec/projects/steckruebe/zgrab2.git
