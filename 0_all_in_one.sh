@@ -10,8 +10,9 @@ fi
 
 echo "[#] Gathering Tickets"
 
-python3 1_gather_tickets.py tranco_XJJ9N.csv 100000
+python3 1_gather_tickets.py tranco_LJ7W4.csv 100000
 
+exit
 cd neo4j
 docker stop steckruebe-graph-database || true
 

@@ -280,16 +280,18 @@ class MergeUniq(CacheableStage[list[str]]):
             all_items.update(lst)
         return sorted(all_items)
 
+
 class DomainFromAlexaFormat(Stage[list[str]]):
     def __init__(self, stats: _Stats) -> None:
         super().__init__("DomainFromAlexaFormat", stats)
 
     def _run_stage(self, alexa_format: list[str]) -> Iterable[str]:
         for line in alexa_format:
-            yield line.split(",")[1]
-    
+            yield line.split(",", 1)[1]
+
     def run_stage(self, alexa_format: list[str]) -> list[str]:
         return list(self._run_stage(alexa_format))
+
 
 class DuplicateDomainFilter(Stage[list[str]]):
     def __init__(self, stats: _Stats) -> None:
@@ -306,6 +308,7 @@ class DuplicateDomainFilter(Stage[list[str]]):
     def run_stage(self, domains: list[str]) -> list[str]:
         # keeps a set of all domains that have been seen across multiple calls to run_stage and only returns only the list of new domains
         return list(self._run_stage(domains))
+
 
 class MapIPsToDomains(CacheableStage[list[tuple[str, str]]]):
     def __init__(self, stats: _Stats) -> None:
@@ -341,7 +344,7 @@ class ZgrabRunner(Stage[int]):
         name,
         stats: _Stats,
         executable: str,
-        #output_file: str,
+        # output_file: str,
         out_filter: JsonFilter,
         *args,
         processing_procs=8,
@@ -353,7 +356,7 @@ class ZgrabRunner(Stage[int]):
 
         self.connections_per_host = 1
         self.out_filter = out_filter
-        #self.output_file = output_file
+        # self.output_file = output_file
         for arg in self.args:
             if arg.startswith("--connections-per-host="):
                 self.connections_per_host = int(arg.split("=")[1])
@@ -369,7 +372,7 @@ class ZgrabRunner(Stage[int]):
         self.logger.info(f"Sent {len(ip_and_hosts)} targets to zgrab")
 
     def run_stage(self, output_file: str, ip_and_hosts: list[tuple[str, str]]) -> int:
-        self.output_file = output_file # TODO: temporary
+        self.output_file = output_file  # TODO: temporary
         if op.isfile(self.output_file):
             self.logger.warning(f"Output file {self.output_file!r} already exists. Skipping.")
             return -1
@@ -462,10 +465,12 @@ class ZgrabRunner(Stage[int]):
 class CertificateSANExtractor(Stage[list[str]]):
     def __init__(self, stats: _Stats) -> None:
         super().__init__("CertificateSANExtractor", stats)
-    
+
     def parse_san_from_result(self, item):
         try:
-            return item["result"]["response"]["request"]["tls_log"]["handshake_log"]["server_certificates"]["certificate"]["parsed"]["extensions"]["subject_alt_name"]["dns_names"]
+            return item["result"]["response"]["request"]["tls_log"]["handshake_log"]["server_certificates"][
+                "certificate"
+            ]["parsed"]["extensions"]["subject_alt_name"]["dns_names"]
         except KeyError:
             return []
 
@@ -485,8 +490,9 @@ class CertificateSANExtractor(Stage[list[str]]):
                 if not base_domain.startswith("www."):
                     all_sans.add(f"www.{base_domain}")
                 all_sans.add(base_domain)
-                
+
         return list(all_sans)
+
 
 class PostProcessZGrab(Stage[None]):
     def __init__(self, stats: _Stats, connections_per_host: int) -> None:
@@ -635,6 +641,7 @@ class FILES(str, Enum):
         # so that FILES.TRANCO[0] returns the string tranco_head.r0.csv for multiple iterations of a cached stage
         return self.value.replace(".", f".r{item}.")
 
+
 ZGRAB_FILTER = JsonFilter(
     "data.https-tls1_3.result.*",
     "!data.https-tls1_3.result.response.request.tls_log",
@@ -674,7 +681,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             "-p",
             "443",
             "-w",
-            FILES.FILTERED_4_IPLIST, # this changes on each run
+            FILES.FILTERED_4_IPLIST,  # this changes on each run
         )
         ZMAP6 = SimpleSubprocessStage(
             "ZMAP6",
@@ -687,7 +694,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             "--ipv6-source-ip",
             CONST.IPv6SRC,
             "--ipv6-target-file",
-            FILES.FILTERED_6_IPLIST, # this changes on each run
+            FILES.FILTERED_6_IPLIST,  # this changes on each run
         )
         MERGE_UNIQ = MergeUniq(stats)
         MAP_IPS_TO_DOMAINS = MapIPsToDomains(stats)
@@ -695,7 +702,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             "Zgrab",
             stats,
             EXEUTABLES.ZGRAB,
-            #FILES.ZGRAB_OUT, # this changes on each run
+            # FILES.ZGRAB_OUT, # this changes on each run
             ZGRAB_FILTER.apply_str_in_str_out,
             "multiple",
             "-c",
@@ -713,28 +720,33 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
     # do while new_sans is not empty
     while True:
         unique_domains = STAGES.DUPLICATE_DOMAINS(domains)
-        resolved_hosts = STAGES.ZDNS(input_string_list=unique_domains, cache_file=FILES.RESOLVED_DOMAINS[RUN_ID], dry_run=DRY_RUN)
+        resolved_hosts = STAGES.ZDNS(
+            input_string_list=unique_domains, cache_file=FILES.RESOLVED_DOMAINS[RUN_ID], dry_run=DRY_RUN
+        )
 
         IPv4s = STAGES.JQ4(resolved_hosts, cache_file=FILES.RESOLVED_IPS4[RUN_ID])
         IPv6s = STAGES.JQ6(resolved_hosts, cache_file=FILES.RESOLVED_IPS6[RUN_ID])
 
         IPv4s = STAGES.BLOCKLIST4(IPv4s, cache_file=FILES.FILTERED_4_IPLIST[RUN_ID])
         IPv6s = STAGES.BLOCKLIST6(IPv6s, cache_file=FILES.FILTERED_6_IPLIST[RUN_ID])
-        
+
         IPv4s = STAGES.ZMAP4(cache_file=FILES.HTTPS_4_IPLIST[RUN_ID], dry_run=DRY_RUN)
         IPv6s = STAGES.ZMAP6(cache_file=FILES.HTTPS_6_IPLIST[RUN_ID], dry_run=DRY_RUN)
 
         IPs = STAGES.MERGE_UNIQ(IPv4s, IPv6s, cache_file=FILES.MERGED_IP_LIST[RUN_ID])
         del IPv4s, IPv6s
 
-        ip_and_hosts = STAGES.MAP_IPS_TO_DOMAINS(resolved_hosts, IPs, cache_file=FILES.MERGED_HOST_LIST[RUN_ID], dry_run=DRY_RUN)
+        ip_and_hosts = STAGES.MAP_IPS_TO_DOMAINS(
+            resolved_hosts, IPs, cache_file=FILES.MERGED_HOST_LIST[RUN_ID], dry_run=DRY_RUN
+        )
         del resolved_hosts
         if not DRY_RUN:
             STAGES.ZGRAB(ip_and_hosts=ip_and_hosts, output_file=FILES.ZGRAB_OUT[RUN_ID])
-        
+
         new_sans = STAGES.EXTRACT_NEW_SANS(FILES.ZGRAB_OUT[RUN_ID])
         STAGES.PP_ZGRAB(FILES.ZGRAB_OUT[RUN_ID], FILES.ZGRAB_MERGED_OUT[RUN_ID])
-        if not new_sans: break
+        if not new_sans:
+            break
 
 
 def test_zdns():

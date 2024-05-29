@@ -232,6 +232,7 @@ class ZgrabHelper:
 
 ZGRAB2_FILTER = JsonFilter(
     "data.http.result.*",
+    "!data.http.result.response.body",
     "!data.http.result.response.status_code",
     "!data.http.result.response.status_line",
     "!data.http.result.response.headers",
@@ -274,6 +275,8 @@ class Zgrab2Scanner(Scanner):
                 cmd.append("--redirects-succeed")
             if max_redirects:
                 cmd.append(f"--max-redirects={max_redirects}")
+            cmd.append("--max-size=1024")
+            cmd.append("--user-agent=Mozilla/5.0 zgrab/fork-tls1.3")
 
         if force_session_tickets:
             cmd.append("--force-session-ticket")
@@ -288,7 +291,6 @@ class Zgrab2Scanner(Scanner):
         if use_session_cache and session_cache_dir is not None:
             cmd.append(f"--session-cache-dir={session_cache_dir}")
 
-        cmd.append("--user-agent=Mozilla/5.0 zgrab/fork-tls1.3")
         cmd.append("--senders=1")  # throttle ourselves a bit. We are running multithreaded anyways.
 
         return cmd
@@ -334,6 +336,8 @@ class Zgrab2Scanner(Scanner):
             body = result["data"]["http"]["result"]["response"]["body"]
             # extract title from html body
             result["data"]["http"]["result"]["response"]["content_title"] = title = extract_title(body)
+            # if we keep the body for debugging, we truncate it a bit
+            result["data"]["http"]["result"]["response"]["body"] = body[:10_000]
         except KeyError:
             pass
         return ZGRAB2_FILTER(result)
