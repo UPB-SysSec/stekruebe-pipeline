@@ -65,16 +65,21 @@ OUTPUTS = TypeVar("OUTPUTS")
 class _Stats:
     def __init__(self, filename: str):
         self.filename = filename
-        self.existing_keys = set()
+        # track highest run id for each stage statistic
+        self.seen = dict()
 
-    def store(self, stage_name: str, name: str, data: Any):
+    def store(self, stage_name: str, name: str, data: Any, RUN_ID: int = 0):
+        if (stage_name, name) in self.seen:
+            RUN_ID = self.seen[(stage_name, name)] + 1
         with open(self.filename, "a", newline="") as f:
-            csv.writer(f).writerow([stage_name, name, json.dumps(data)])
+            csv.writer(f).writerow([stage_name, name, json.dumps(data), RUN_ID])
+        self.seen.update({(stage_name, name): RUN_ID})
 
 
 class Stage(ABC, Generic[OUTPUTS]):
     def __init__(self, name, stats: _Stats) -> None:
-        self.logger = logging.getLogger(__name__ + "." + name)
+        # self.logger = logging.getLogger(__name__ + "." + name) # i dont like the __name__ look
+        self.logger = logging.getLogger(name)
         self.name = name
         self.stats = stats
 
@@ -83,7 +88,8 @@ class Stage(ABC, Generic[OUTPUTS]):
             self.stats.store(self.name, name, data)
 
     @abstractmethod
-    def run_stage(self, *args, **kwargs) -> OUTPUTS: ...
+    def run_stage(self, *args, **kwargs) -> OUTPUTS:
+        ...
 
     def __call__(self, *args, **kwargs) -> Any:
         self.logger.info(f"Starting")
@@ -127,7 +133,15 @@ class CacheableStage(Stage[OUTPUTS]):
             format = self.cache_as_format
         return format.parse_from_file(output_file)
 
-    def __call__(self, *args, cache_file, cache_write=True, cache_load=True, dry_run=False, **kwargs):
+    def __call__(
+        self,
+        *args,
+        cache_file,
+        cache_write=True,
+        cache_load=True,
+        dry_run=False,
+        **kwargs,
+    ):
         if cache_file and op.isfile(cache_file):
             if cache_load:
                 self.logger.info(f"Loading results from {cache_file}")
@@ -169,7 +183,9 @@ class FileLineReader(Stage[list[str]]):
 
 
 class SimpleSubprocessStage(CacheableStage[list[str]]):
-    def __init__(self, name, stats, command, *args, cache_as_format: FileFormat = ..., **kwargs) -> None:
+    def __init__(
+        self, name, stats, command, *args, cache_as_format: FileFormat = ..., **kwargs
+    ) -> None:
         super().__init__(name, stats, cache_as_format=cache_as_format)
         self.command = command
         self.args = args
@@ -233,13 +249,14 @@ class ZDNS(SimpleSubprocessStage):
         self._store_stat("both_v4_and_v6", both)
         return ret
 
+
 class ZMAP4(SimpleSubprocessStage):
     def __init__(self, stats, *args, name_overwrite="ZMAP4", **kwargs) -> None:
         super().__init__(name_overwrite, stats, *args, **kwargs)
 
     def run_stage(self, blocklist=None, allowlist=None) -> list[str]:
         # dynamically overwrite blocklist and allowlist by changing args following -b and -w respectively
-        
+
         # FIXME: This is dirty but should be good enough for now (LAST WORDS OF A LAZY PROGRAMMER)
         new_args = list(self.args)
         if blocklist:
@@ -266,6 +283,7 @@ class ZMAP4(SimpleSubprocessStage):
         self._store_stat("zmap4 runtime", end - start)
         return ret
 
+
 class ZMAP6(SimpleSubprocessStage):
     def __init__(self, stats, *args, name_overwrite="ZMAP6", **kwargs) -> None:
         super().__init__(name_overwrite, stats, *args, **kwargs)
@@ -285,6 +303,7 @@ class ZMAP6(SimpleSubprocessStage):
         end = time.time()
         self._store_stat("zmap6 runtime", end - start)
         return ret
+
 
 class BlocklistFilter(CacheableStage[list[str]]):
     def __init__(self, name, stats: _Stats, blocklist_file) -> None:
@@ -414,7 +433,9 @@ class ZgrabRunner(Stage[int]):
             if arg.startswith("--connections-per-host="):
                 self.connections_per_host = int(arg.split("=")[1])
 
-    def _send_targets(self, proc: subprocess.Popen, ip_and_hosts: list[tuple[str, str]]):
+    def _send_targets(
+        self, proc: subprocess.Popen, ip_and_hosts: list[tuple[str, str]]
+    ):
         for ip, host in ip_and_hosts:
             ln = f"{ip},{host}\n"
             if not proc.text_mode:
@@ -427,7 +448,9 @@ class ZgrabRunner(Stage[int]):
     def run_stage(self, output_file: str, ip_and_hosts: list[tuple[str, str]]) -> int:
         self.output_file = output_file  # TODO: temporary
         if op.isfile(self.output_file):
-            self.logger.warning(f"Output file {self.output_file!r} already exists. Skipping.")
+            self.logger.warning(
+                f"Output file {self.output_file!r} already exists. Skipping."
+            )
             return -1
 
         EXPECTED = len(ip_and_hosts) * self.connections_per_host
@@ -458,7 +481,9 @@ class ZgrabRunner(Stage[int]):
             last_n = processed_items
 
         with (
-            open(self.output_file, "w") if self.output_file else open(os.devnull, "w") as fo,
+            open(self.output_file, "w")
+            if self.output_file
+            else open(os.devnull, "w") as fo,
             multiprocessing.Pool(self.processing_procs) as pool,
             # create the subprocess last, if the pool is opened afterwards the subprocess does not properly closed
             subprocess.Popen(
@@ -473,7 +498,9 @@ class ZgrabRunner(Stage[int]):
 
             def _progress_thread():
                 PRINT_EVERY = 5 * 60
-                self.logger.debug(f"Starting progress monitoring thread. Printing every {PRINT_EVERY}s")
+                self.logger.debug(
+                    f"Starting progress monitoring thread. Printing every {PRINT_EVERY}s"
+                )
                 while processed_items < EXPECTED and proc.poll() is None:
                     now = time.time()
                     time_since_last_print = now - last_t
@@ -490,7 +517,10 @@ class ZgrabRunner(Stage[int]):
             progress_thread.start()
 
             inputthread = threading.Thread(
-                target=self._send_targets, args=(proc, ip_and_hosts), name="ZGRAB input thread", daemon=True
+                target=self._send_targets,
+                args=(proc, ip_and_hosts),
+                name="ZGRAB input thread",
+                daemon=True,
             )
             inputthread.start()
             while (returncode := proc.poll()) is None:
@@ -503,11 +533,15 @@ class ZgrabRunner(Stage[int]):
                     ipercent = int(100 * processed_items / EXPECTED)
                     if ipercent > last_ipercent:
                         _print_progress()
-            self.logger.info(f"Finished processing {processed_items} items; exitcode {returncode}")
+            self.logger.info(
+                f"Finished processing {processed_items} items; exitcode {returncode}"
+            )
             stderr += proc.stderr.read()
 
         if returncode:
-            raise subprocess.CalledProcessError(self.returncode, self.args, self.stdout, self.stderr)
+            raise subprocess.CalledProcessError(
+                self.returncode, self.args, self.stdout, self.stderr
+            )
         self.logger.info(f"Zgrab Output: {stderr!r}")
         status_line = stderr.decode().strip().split("\n")[-1]
         status = json.loads(status_line)
@@ -521,9 +555,9 @@ class CertificateSANExtractor(Stage[list[str]]):
 
     def parse_san_from_result(self, item):
         try:
-            return item["result"]["response"]["request"]["tls_log"]["handshake_log"]["server_certificates"][
-                "certificate"
-            ]["parsed"]["extensions"]["subject_alt_name"]["dns_names"]
+            return item["result"]["response"]["request"]["tls_log"]["handshake_log"][
+                "server_certificates"
+            ]["certificate"]["parsed"]["extensions"]["subject_alt_name"]["dns_names"]
         except KeyError:
             return []
 
@@ -532,8 +566,12 @@ class CertificateSANExtractor(Stage[list[str]]):
         with open(zgrab_out_file) as f:
             while ln := f.readline():
                 item = json.loads(ln)
-                all_sans.update(self.parse_san_from_result(item["data"]["https-tls1_3"]))
-                all_sans.update(self.parse_san_from_result(item["data"]["https-tls1_0-1_2"]))
+                all_sans.update(
+                    self.parse_san_from_result(item["data"]["https-tls1_3"])
+                )
+                all_sans.update(
+                    self.parse_san_from_result(item["data"]["https-tls1_0-1_2"])
+                )
 
         # TODO: the www thing is included twice in the diagram, is this enough?
         for san in all_sans.copy():
@@ -636,7 +674,14 @@ class PostProcessZGrab(Stage[None]):
                 grouped_zgrab_results[key].append(zgrab_result)
 
                 if len(grouped_zgrab_results[key]) >= self.connections_per_host:
-                    json.dump({"ip": ip, "domain": domain, "results": grouped_zgrab_results[key]}, f_out)
+                    json.dump(
+                        {
+                            "ip": ip,
+                            "domain": domain,
+                            "results": grouped_zgrab_results[key],
+                        },
+                        f_out,
+                    )
                     f_out.write("\n")
                     del grouped_zgrab_results[key]
                     handled.add(key)
@@ -690,7 +735,7 @@ class FILES:
     def get(item, RUN_ID=None):
         if RUN_ID is None:
             return getattr(FILES, item)
-        return getattr(FILES, item).replace(".", f".r{RUN_ID}.")
+        return getattr(FILES, item).replace(".", f".r{RUN_ID:02d}.")
 
 
 ZGRAB_FILTER = JsonFilter(
@@ -704,6 +749,7 @@ ZGRAB_FILTER = JsonFilter(
 
 
 def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
+    logger = logging.getLogger("Main")
     stats = _Stats("out/stats.csv")
 
     class STAGES:
@@ -719,8 +765,20 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             cache_as_format=FileFormat.TXT,
         )
         DUPLICATE_DOMAINS = DuplicateDomainFilter(stats)
-        JQ4 = SimpleSubprocessStage("JQ4", stats, EXEUTABLES.JQ, "-r", ".data.ipv4_addresses | select(. != null) | .[]")
-        JQ6 = SimpleSubprocessStage("JQ6", stats, EXEUTABLES.JQ, "-r", ".data.ipv6_addresses | select(. != null) | .[]")
+        JQ4 = SimpleSubprocessStage(
+            "JQ4",
+            stats,
+            EXEUTABLES.JQ,
+            "-r",
+            ".data.ipv4_addresses | select(. != null) | .[]",
+        )
+        JQ6 = SimpleSubprocessStage(
+            "JQ6",
+            stats,
+            EXEUTABLES.JQ,
+            "-r",
+            ".data.ipv6_addresses | select(. != null) | .[]",
+        )
         BLOCKLIST4 = BlocklistFilter("Blocklist4", stats, FILES.get("BLOCKLIST_4"))
         BLOCKLIST6 = BlocklistFilter("Blocklist6", stats, FILES.get("BLOCKLIST_6"))
         ZMAP4 = ZMAP4(
@@ -768,38 +826,65 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
 
     # do while new_sans is not empty
     while True:
-        logging.info(f"Starting run {RUN_ID}")
-        stats.store(__name__, "run_id", RUN_ID)
+        logger.info(f"Starting run {RUN_ID}")
         unique_domains = STAGES.DUPLICATE_DOMAINS(domains)
         resolved_hosts = STAGES.ZDNS(
-            input_string_list=unique_domains, cache_file=FILES.get("RESOLVED_DOMAINS", RUN_ID), dry_run=DRY_RUN
+            input_string_list=unique_domains,
+            cache_file=FILES.get("RESOLVED_DOMAINS", RUN_ID),
+            dry_run=DRY_RUN,
         )
 
-        IPv4s = STAGES.JQ4(resolved_hosts, cache_file=FILES.get("RESOLVED_IPS4", RUN_ID))
-        IPv6s = STAGES.JQ6(resolved_hosts, cache_file=FILES.get("RESOLVED_IPS6", RUN_ID))
+        IPv4s = STAGES.JQ4(
+            resolved_hosts, cache_file=FILES.get("RESOLVED_IPS4", RUN_ID)
+        )
+        IPv6s = STAGES.JQ6(
+            resolved_hosts, cache_file=FILES.get("RESOLVED_IPS6", RUN_ID)
+        )
 
-        IPv4s = STAGES.BLOCKLIST4(IPv4s, cache_file=FILES.get("FILTERED_4_IPLIST", RUN_ID))
-        IPv6s = STAGES.BLOCKLIST6(IPv6s, cache_file=FILES.get("FILTERED_6_IPLIST", RUN_ID))
+        IPv4s = STAGES.BLOCKLIST4(
+            IPv4s, cache_file=FILES.get("FILTERED_4_IPLIST", RUN_ID)
+        )
+        IPv6s = STAGES.BLOCKLIST6(
+            IPv6s, cache_file=FILES.get("FILTERED_6_IPLIST", RUN_ID)
+        )
 
-        IPv4s = STAGES.ZMAP4(allowlist=FILES.get("FILTERED_4_IPLIST", RUN_ID), cache_file=FILES.get("HTTPS_4_IPLIST", RUN_ID), dry_run=DRY_RUN)
-        IPv6s = STAGES.ZMAP6(targets=FILES.get("FILTERED_6_IPLIST", RUN_ID), cache_file=FILES.get("HTTPS_6_IPLIST", RUN_ID), dry_run=DRY_RUN)
+        IPv4s = STAGES.ZMAP4(
+            allowlist=FILES.get("FILTERED_4_IPLIST", RUN_ID),
+            cache_file=FILES.get("HTTPS_4_IPLIST", RUN_ID),
+            dry_run=DRY_RUN,
+        )
+        IPv6s = STAGES.ZMAP6(
+            targets=FILES.get("FILTERED_6_IPLIST", RUN_ID),
+            cache_file=FILES.get("HTTPS_6_IPLIST", RUN_ID),
+            dry_run=DRY_RUN,
+        )
 
-        IPs = STAGES.MERGE_UNIQ(IPv4s, IPv6s, cache_file=FILES.get("MERGED_IP_LIST", RUN_ID))
+        IPs = STAGES.MERGE_UNIQ(
+            IPv4s, IPv6s, cache_file=FILES.get("MERGED_IP_LIST", RUN_ID)
+        )
         del IPv4s, IPv6s
 
         ip_and_hosts = STAGES.MAP_IPS_TO_DOMAINS(
-            resolved_hosts, IPs, cache_file=FILES.get("MERGED_HOST_LIST", RUN_ID), dry_run=DRY_RUN
+            resolved_hosts,
+            IPs,
+            cache_file=FILES.get("MERGED_HOST_LIST", RUN_ID),
+            dry_run=DRY_RUN,
         )
         del resolved_hosts
         if not DRY_RUN:
-            STAGES.ZGRAB(ip_and_hosts=ip_and_hosts, output_file=FILES.get("ZGRAB_OUT", RUN_ID))
+            STAGES.ZGRAB(
+                ip_and_hosts=ip_and_hosts, output_file=FILES.get("ZGRAB_OUT", RUN_ID)
+            )
 
         new_sans = STAGES.EXTRACT_NEW_SANS(FILES.get("ZGRAB_OUT", RUN_ID))
-        STAGES.PP_ZGRAB(FILES.get("ZGRAB_OUT", RUN_ID), FILES.get("ZGRAB_MERGED_OUT", RUN_ID))
+        STAGES.PP_ZGRAB(
+            FILES.get("ZGRAB_OUT", RUN_ID), FILES.get("ZGRAB_MERGED_OUT", RUN_ID)
+        )
         if not new_sans:
             break
         domains = new_sans
         RUN_ID += 1
+    # STAGES.MERGE_RUNS(["out/6_zgrab*.json", "out/7_merged_zgrab*.json"]) # TODO: doing this cleanly is a bit more complicated
 
 
 def test_zdns():
@@ -824,15 +909,44 @@ def test_zdns():
         "iterative_it10": ["--iterative", "--iteration-timeout", "10"],
         "iterative_it20": ["--iterative", "--iteration-timeout", "20"],
         "iterative_t30": ["--iterative", "--timeout", "30"],
-        "iterative_t30_it10": ["--iterative", "--timeout", "30", "--iteration-timeout", "10"],
-        "iterative_t30_it20": ["--iterative", "--timeout", "30", "--iteration-timeout", "20"],
+        "iterative_t30_it10": [
+            "--iterative",
+            "--timeout",
+            "30",
+            "--iteration-timeout",
+            "10",
+        ],
+        "iterative_t30_it20": [
+            "--iterative",
+            "--timeout",
+            "30",
+            "--iteration-timeout",
+            "20",
+        ],
         "iterative_t60": ["--iterative", "--timeout", "60"],
-        "iterative_t60_it10": ["--iterative", "--timeout", "60", "--iteration-timeout", "10"],
-        "iterative_t60_it20": ["--iterative", "--timeout", "60", "--iteration-timeout", "20"],
+        "iterative_t60_it10": [
+            "--iterative",
+            "--timeout",
+            "60",
+            "--iteration-timeout",
+            "10",
+        ],
+        "iterative_t60_it20": [
+            "--iterative",
+            "--timeout",
+            "60",
+            "--iteration-timeout",
+            "20",
+        ],
     }.items():
         try:
             ZDNS(
-                stats, EXEUTABLES.ZDNS, *_DEFAULT_ARGS, *extra_args, cache_as_format=FileFormat.TXT, name_overwrite=name
+                stats,
+                EXEUTABLES.ZDNS,
+                *_DEFAULT_ARGS,
+                *extra_args,
+                cache_as_format=FileFormat.TXT,
+                name_overwrite=name,
             )(input_string_list=tranco, cache_file=f"out_test/{name}.json")
         except subprocess.CalledProcessError as e:
             print(f"Failed for {name}")
@@ -874,8 +988,10 @@ def test_zgrab():
 
 if __name__ == "__main__":
     logging.basicConfig(
-        level=logging.DEBUG, format="%(asctime)s %(levelname)-7s | %(name)-26s.%(funcName)-20s: %(message)s"
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)-7s | %(name)-25s.%(funcName)-15s: %(message)s",
     )
+
     if len(sys.argv) > 1:
         FILES.TRANCO = sys.argv[1]
     n_lines = None
