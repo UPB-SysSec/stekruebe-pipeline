@@ -125,7 +125,7 @@ class Edge:
 
 # for a useful progress bar
 print("[1] Generating nodes and edges")
-with open("../out/7_merged_zgrab.json") as f:
+with open("../out/7_merged_zgrab_all.json") as f:
     for i, ln in enumerate(tqdm(f, total=NUM_LINES)):
         item = json.loads(ln)
 
@@ -143,19 +143,13 @@ with open("../out/7_merged_zgrab.json") as f:
                     # _error does not appear when we have a successful connection
                     continue
                 # not a fan, might as well use "tickets" for 1.2 as well :D
-                tickets = result.get("tickets", []) + (
-                    [result["ticket"]] if "ticket" in result else []
-                )
+                tickets = result.get("tickets", []) + ([result["ticket"]] if "ticket" in result else [])
 
                 for ticket in tickets:
                     # ticket is a base64 encoded ticket, we are only interested in the first 4 and 16 bytes
                     ticket = base64.b64decode(ticket)
-                    prefix4 = PrefixNode(
-                        ticket[:4].hex(), result["version"], scan=probe_name
-                    )
-                    prefix16 = PrefixNode(
-                        ticket[:16].hex(), result["version"], scan=probe_name
-                    )
+                    prefix4 = PrefixNode(ticket[:4].hex(), result["version"], scan=probe_name)
+                    prefix16 = PrefixNode(ticket[:16].hex(), result["version"], scan=probe_name)
 
                     nodes.add(prefix4)
                     nodes.add(prefix16)

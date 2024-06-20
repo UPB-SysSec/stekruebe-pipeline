@@ -88,8 +88,7 @@ class Stage(ABC, Generic[OUTPUTS]):
             self.stats.store(self.name, name, data)
 
     @abstractmethod
-    def run_stage(self, *args, **kwargs) -> OUTPUTS:
-        ...
+    def run_stage(self, *args, **kwargs) -> OUTPUTS: ...
 
     def __call__(self, *args, **kwargs) -> Any:
         self.logger.info(f"Starting")
@@ -183,9 +182,7 @@ class FileLineReader(Stage[list[str]]):
 
 
 class SimpleSubprocessStage(CacheableStage[list[str]]):
-    def __init__(
-        self, name, stats, command, *args, cache_as_format: FileFormat = ..., **kwargs
-    ) -> None:
+    def __init__(self, name, stats, command, *args, cache_as_format: FileFormat = ..., **kwargs) -> None:
         super().__init__(name, stats, cache_as_format=cache_as_format)
         self.command = command
         self.args = args
@@ -433,9 +430,7 @@ class ZgrabRunner(Stage[int]):
             if arg.startswith("--connections-per-host="):
                 self.connections_per_host = int(arg.split("=")[1])
 
-    def _send_targets(
-        self, proc: subprocess.Popen, ip_and_hosts: list[tuple[str, str]]
-    ):
+    def _send_targets(self, proc: subprocess.Popen, ip_and_hosts: list[tuple[str, str]]):
         for ip, host in ip_and_hosts:
             ln = f"{ip},{host}\n"
             if not proc.text_mode:
@@ -448,9 +443,7 @@ class ZgrabRunner(Stage[int]):
     def run_stage(self, output_file: str, ip_and_hosts: list[tuple[str, str]]) -> int:
         self.output_file = output_file  # TODO: temporary
         if op.isfile(self.output_file):
-            self.logger.warning(
-                f"Output file {self.output_file!r} already exists. Skipping."
-            )
+            self.logger.warning(f"Output file {self.output_file!r} already exists. Skipping.")
             return -1
 
         EXPECTED = len(ip_and_hosts) * self.connections_per_host
@@ -481,9 +474,7 @@ class ZgrabRunner(Stage[int]):
             last_n = processed_items
 
         with (
-            open(self.output_file, "w")
-            if self.output_file
-            else open(os.devnull, "w") as fo,
+            open(self.output_file, "w") if self.output_file else open(os.devnull, "w") as fo,
             multiprocessing.Pool(self.processing_procs) as pool,
             # create the subprocess last, if the pool is opened afterwards the subprocess does not properly closed
             subprocess.Popen(
@@ -498,9 +489,7 @@ class ZgrabRunner(Stage[int]):
 
             def _progress_thread():
                 PRINT_EVERY = 5 * 60
-                self.logger.debug(
-                    f"Starting progress monitoring thread. Printing every {PRINT_EVERY}s"
-                )
+                self.logger.debug(f"Starting progress monitoring thread. Printing every {PRINT_EVERY}s")
                 while processed_items < EXPECTED and proc.poll() is None:
                     now = time.time()
                     time_since_last_print = now - last_t
@@ -533,15 +522,11 @@ class ZgrabRunner(Stage[int]):
                     ipercent = int(100 * processed_items / EXPECTED)
                     if ipercent > last_ipercent:
                         _print_progress()
-            self.logger.info(
-                f"Finished processing {processed_items} items; exitcode {returncode}"
-            )
+            self.logger.info(f"Finished processing {processed_items} items; exitcode {returncode}")
             stderr += proc.stderr.read()
 
         if returncode:
-            raise subprocess.CalledProcessError(
-                self.returncode, self.args, self.stdout, self.stderr
-            )
+            raise subprocess.CalledProcessError(self.returncode, self.args, self.stdout, self.stderr)
         self.logger.info(f"Zgrab Output: {stderr!r}")
         status_line = stderr.decode().strip().split("\n")[-1]
         status = json.loads(status_line)
@@ -555,9 +540,9 @@ class CertificateSANExtractor(Stage[list[str]]):
 
     def parse_san_from_result(self, item):
         try:
-            return item["result"]["response"]["request"]["tls_log"]["handshake_log"][
-                "server_certificates"
-            ]["certificate"]["parsed"]["extensions"]["subject_alt_name"]["dns_names"]
+            return item["result"]["response"]["request"]["tls_log"]["handshake_log"]["server_certificates"][
+                "certificate"
+            ]["parsed"]["extensions"]["subject_alt_name"]["dns_names"]
         except KeyError:
             return []
 
@@ -566,12 +551,8 @@ class CertificateSANExtractor(Stage[list[str]]):
         with open(zgrab_out_file) as f:
             while ln := f.readline():
                 item = json.loads(ln)
-                all_sans.update(
-                    self.parse_san_from_result(item["data"]["https-tls1_3"])
-                )
-                all_sans.update(
-                    self.parse_san_from_result(item["data"]["https-tls1_0-1_2"])
-                )
+                all_sans.update(self.parse_san_from_result(item["data"]["https-tls1_3"]))
+                all_sans.update(self.parse_san_from_result(item["data"]["https-tls1_0-1_2"]))
 
         # TODO: the www thing is included twice in the diagram, is this enough?
         for san in all_sans.copy():
@@ -828,25 +809,20 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
     while True:
         logger.info(f"Starting run {RUN_ID}")
         unique_domains = STAGES.DUPLICATE_DOMAINS(domains)
+        # TODO store new domains in a file
+        if not unique_domains:
+            break
         resolved_hosts = STAGES.ZDNS(
             input_string_list=unique_domains,
             cache_file=FILES.get("RESOLVED_DOMAINS", RUN_ID),
             dry_run=DRY_RUN,
         )
 
-        IPv4s = STAGES.JQ4(
-            resolved_hosts, cache_file=FILES.get("RESOLVED_IPS4", RUN_ID)
-        )
-        IPv6s = STAGES.JQ6(
-            resolved_hosts, cache_file=FILES.get("RESOLVED_IPS6", RUN_ID)
-        )
+        IPv4s = STAGES.JQ4(resolved_hosts, cache_file=FILES.get("RESOLVED_IPS4", RUN_ID))
+        IPv6s = STAGES.JQ6(resolved_hosts, cache_file=FILES.get("RESOLVED_IPS6", RUN_ID))
 
-        IPv4s = STAGES.BLOCKLIST4(
-            IPv4s, cache_file=FILES.get("FILTERED_4_IPLIST", RUN_ID)
-        )
-        IPv6s = STAGES.BLOCKLIST6(
-            IPv6s, cache_file=FILES.get("FILTERED_6_IPLIST", RUN_ID)
-        )
+        IPv4s = STAGES.BLOCKLIST4(IPv4s, cache_file=FILES.get("FILTERED_4_IPLIST", RUN_ID))
+        IPv6s = STAGES.BLOCKLIST6(IPv6s, cache_file=FILES.get("FILTERED_6_IPLIST", RUN_ID))
 
         IPv4s = STAGES.ZMAP4(
             allowlist=FILES.get("FILTERED_4_IPLIST", RUN_ID),
@@ -859,9 +835,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             dry_run=DRY_RUN,
         )
 
-        IPs = STAGES.MERGE_UNIQ(
-            IPv4s, IPv6s, cache_file=FILES.get("MERGED_IP_LIST", RUN_ID)
-        )
+        IPs = STAGES.MERGE_UNIQ(IPv4s, IPv6s, cache_file=FILES.get("MERGED_IP_LIST", RUN_ID))
         del IPv4s, IPv6s
 
         ip_and_hosts = STAGES.MAP_IPS_TO_DOMAINS(
@@ -872,14 +846,10 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
         )
         del resolved_hosts
         if not DRY_RUN:
-            STAGES.ZGRAB(
-                ip_and_hosts=ip_and_hosts, output_file=FILES.get("ZGRAB_OUT", RUN_ID)
-            )
+            STAGES.ZGRAB(ip_and_hosts=ip_and_hosts, output_file=FILES.get("ZGRAB_OUT", RUN_ID))
 
         new_sans = STAGES.EXTRACT_NEW_SANS(FILES.get("ZGRAB_OUT", RUN_ID))
-        STAGES.PP_ZGRAB(
-            FILES.get("ZGRAB_OUT", RUN_ID), FILES.get("ZGRAB_MERGED_OUT", RUN_ID)
-        )
+        STAGES.PP_ZGRAB(FILES.get("ZGRAB_OUT", RUN_ID), FILES.get("ZGRAB_MERGED_OUT", RUN_ID))
         if not new_sans:
             break
         domains = new_sans

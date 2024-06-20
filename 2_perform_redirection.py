@@ -87,7 +87,7 @@ class _Stats:
             DURATION = datetime.timedelta(seconds=elapsed + ETA)
             ETA = datetime.timedelta(seconds=ETA)
         ret = (
-            f"Total: {self.domains} domains, {self.targets} targets in {elapsed:.2f} seconds | "
+            f"Total: {self.domains}/{self.expected_domains} domains, {self.targets} targets in {elapsed:.2f} seconds | "
             f"{self.domains/elapsed:.2f} domains/s {100.0*self.domains/self.expected_domains:5.2f}% | "
             f"ETA: {ETA} / Total: {DURATION} | "
             f"{self.targets/elapsed:.2f} targets/s"
@@ -240,7 +240,7 @@ ZGRAB2_FILTER = JsonFilter(
     "!data.http.result.response.content_length",
     "!data.http.result.response.content_title",
     "!data.http.result.response.request.tls_log",
-    "*.handshake_log.server_certificates.*.parsed",
+    "*.handshake_log.server_certificates.chain.parsed",
 )
 
 
@@ -299,7 +299,7 @@ class Zgrab2Scanner(Scanner):
         self,
         mongo_driver: MongoClient,
         db_name="steckruebe",
-        collection_name=f"ticket_redirection_{str(datetime.datetime.now())}",
+        collection_name=f"ticket_redirection_{datetime.datetime.now():%Y-%m-%d_%H:%M}",
     ) -> None:
         self.mongo_driver = mongo_driver
         self.mongo_db = mongo_driver[db_name]
@@ -326,16 +326,28 @@ class Zgrab2Scanner(Scanner):
             assert _res is res
             res = res.to_dict()
         except Exception as e:
+            raise e
             res = {"error": str(e), "traceback": traceback.format_exc()}
         assert isinstance(res, dict)
-        insert = self.mongo_collection.insert_one(res)
+        try:
+            self.mongo_collection.insert_one(res)
+        except Exception as e:
+            print(
+                f"Failed to insert result for {domain_from=} {addr_from=} {target_addrs=} {version=} into MongoDB: {e}"
+            )
         STATS.done_targets(len(target_addrs))
 
     def filter_result(self, result: dict):
         try:
             body = result["data"]["http"]["result"]["response"]["body"]
             # extract title from html body
-            result["data"]["http"]["result"]["response"]["content_title"] = title = extract_title(body)
+            title = extract_title(body)
+            if len(title) > 1000:
+                domain = result["domain"]
+                ip = result["ip"]
+                print(f"WARN: long title encountered ({domain}@{ip}) length: {len(title)}, truncating to 10.000")
+                title = title[:10_000]
+            result["data"]["http"]["result"]["response"]["content_title"] = title
             # if we keep the body for debugging, we truncate it a bit
             result["data"]["http"]["result"]["response"]["body"] = body[:10_000]
         except KeyError:
@@ -420,6 +432,8 @@ class Zgrab2Scanner(Scanner):
             res.redirect_status_line = self._parse_status_line(redirect)
             res.status = Zgrab2ResumptionResultStatus.RESUMPTION_RAN
             redirect_results = [self.filter_result(json.loads(res)) for res in redirect.stdout.splitlines()]
+            for redirect_result in redirect_results:
+                del redirect_result["domain"]  # this is the domain_from and just confusing
             res.status = Zgrab2ResumptionResultStatus.RESUMPTION_PARSED
             # HTTP: body_sha, body_title, status_code, location_header
             # del certs
@@ -450,13 +464,26 @@ class Domain:
     def __init__(self, domain):
         self.domain = domain
 
-    def _evaluate_from_ip(self, driver: Driver, scanner: Scanner, source_ip: str):
+    def _evaluate_from_ip(
+        self,
+        driver: Driver,
+        scanner: Scanner,
+        source_ip: str,
+        versions_to_evaluate=(ScanVersion.TLS1_3, ScanVersion.PRE_1_3),
+    ):
+        if set(versions_to_evaluate) > {ScanVersion.TLS1_3, ScanVersion.PRE_1_3}:
+            raise ValueError("versions_to_evaluate must be a subset of {TLS1_3, PRE_1_3}")
+
         with driver.session() as session:
             _QUERY = []
-            for iptype, is_TLS_13 in product(IPType, [False, True]):
-                _QUERY.append(
-                    _BASE_QUERY.format(ip_target_type=iptype.value, v13_equality_operator="=" if is_TLS_13 else "<>")
-                )
+            for iptype in IPType:
+                for version in versions_to_evaluate:
+                    _QUERY.append(
+                        _BASE_QUERY.format(
+                            ip_target_type=iptype.value,
+                            v13_equality_operator="=" if version == ScanVersion.TLS1_3 else "<>",
+                        )
+                    )
             _QUERY = " UNION ".join(_QUERY)
             _targets = session.run(
                 _QUERY,
@@ -472,9 +499,13 @@ class Domain:
                 else:
                     targets_pre13.append(Connectable(target_ip, 443))
 
-        if targets_13:
+        # Always scann all domain,ip pairs, even if we do not have a target
+        # This enables us to gather all bodies
+        # if targets_13:
+        if ScanVersion.TLS1_3 in versions_to_evaluate:
             scanner.scan(self.domain, Connectable(source_ip, 443), targets_13, ScanVersion.TLS1_3)
-        if targets_pre13:
+        # if targets_pre13:
+        if ScanVersion.PRE_1_3 in versions_to_evaluate:
             scanner.scan(self.domain, Connectable(source_ip, 443), targets_pre13, ScanVersion.PRE_1_3)
 
     def _evaluate_in_iptype(self, driver: Driver, scanner: Scanner, tfrom: IPType):
@@ -581,6 +612,63 @@ def main(parallelize, create_indexes=True, profile=False):
             domain.evaluate(neo4j_driver, scanner)
 
 
+def evaluate_missing_pairs(missing_domain_ip_pairs: dict[tuple[str, str], ScanVersion], parallelize, collection_name):
+    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=neo4j_creds.as_tuple())
+    mongo_url = f"mongodb://{mongodb_creds.as_str()}@127.0.0.1:27017/?authSource=admin&readPreference=primary&directConnection=true&ssl=true"
+    print(f"Connecting to {mongo_url=}")
+    mongo_driver = MongoClient(mongo_url, tlsAllowInvalidCertificates=True)
+    mongo_driver.server_info()
+    print("Connected to MongoDB")
+    scanner = Zgrab2Scanner(mongo_driver=mongo_driver, collection_name=collection_name)
+
+    def _evaluate_missing_domain(entry):
+        (domain, ip), versions_to_evaluate = entry
+        Domain(domain)._evaluate_from_ip(neo4j_driver, scanner, ip, versions_to_evaluate)
+        STATS.done_domain()
+
+    STATS.start(len(missing_domain_ip_pairs))
+    if parallelize:
+        num_threads = None
+        if isinstance(parallelize, int):
+            num_threads = parallelize
+        with ThreadPool(processes=num_threads) as pool:
+            pool.map(_evaluate_missing_domain, missing_domain_ip_pairs.items())
+    else:
+        for entry in missing_domain_ip_pairs.items():
+            _evaluate_missing_domain(entry)
+
+
+def main_missing():
+    with open("91.log") as f:
+        missing = {}
+        # skip header
+        for ln in f:
+            if ln.startswith("Missing in both versions:"):
+                break
+        for version_miss, next_start_ln in [
+            ((ScanVersion.TLS1_3, ScanVersion.PRE_1_3), "Missing only 1.3:"),
+            ((ScanVersion.TLS1_3,), "Missing only 1.2:"),
+            ((ScanVersion.PRE_1_3,), None),
+        ]:
+            print(version_miss, len(missing))
+            for ln in f:
+                ln = ln.strip()
+                if ln.startswith("("):
+                    domain, ip = ln.strip("()").split(", ")
+                    domain = domain.strip("'")
+                    ip = ip.strip("'")
+                    if "adoptapet.com" not in domain:
+                        continue
+                    missing[(domain, ip)] = version_miss
+                else:
+                    assert ln.startswith("Missing")
+                    if next_start_ln == ln.strip():
+                        break
+                    raise ValueError(ln)
+        # evaluate_missing_pairs(missing, 64, "ticket_redirection_2024-06-12 19:41:10.680922")
+        evaluate_missing_pairs(missing, False, "test")
+
+
 def test(domain: str):
     neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=neo4j_creds.as_tuple())
     scanner = DummyScanner()  # Test
@@ -603,5 +691,5 @@ def test_with_zgrab(domain: str):
 if __name__ == "__main__":
     # test("latam.com")
     # test_with_zgrab("latam.com")
-    main(64, True, False)
-    # main(False, True, False)
+    # main(64, True, False) # PROD
+    main(False, True, False)  # DEV
