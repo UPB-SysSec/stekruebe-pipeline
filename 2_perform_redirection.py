@@ -1,4 +1,5 @@
 import abc
+import logging
 import subprocess
 import sys
 import tempfile
@@ -8,8 +9,11 @@ from enum import Enum
 import time
 from dataclasses import dataclass, field
 import datetime
+import multiprocessing
+from multiprocessing import Pool as ProcessPool
 from multiprocessing.pool import ThreadPool
 from pymongo import MongoClient
+from pymongo.collection import Collection
 from threading import Thread
 import inspect
 import traceback
@@ -19,6 +23,7 @@ from utils.credentials import mongodb_creds, neo4j_creds
 from utils import json_serialization as json
 from utils.result import Connectable, Zgrab2ResumptionResult, ScanVersion, Zgrab2ResumptionResultStatus
 from utils.misc import extract_title
+from utils.db import connect_mongo, connect_neo4j
 
 
 @dataclass
@@ -30,10 +35,52 @@ class _DBStats:
     time_consumed: int = 0
 
 
+# Global Scan Context
+class ScanContext:
+    neo4j: GraphDatabase = None
+    mongo_result_collection: Collection = None
+    scanner: "Scanner" = None
+
+    @staticmethod
+    def initialize(
+        mongo_collection_name=None, *, create_indexes=True, verify_connectivity=True, dummy_scanner=False, profile=False
+    ):
+        if not mongo_collection_name:
+            mongo_collection_name = f"ticket_redirection_{datetime.datetime.now():%Y-%m-%d_%H:%M}"
+
+        ScanContext.neo4j = connect_neo4j(verify_connectivity=verify_connectivity)
+        if profile:
+            ScanContext.neo4j = _ProfileDriver(STATS, ScanContext.neo4j, profile)
+
+        mongodb = connect_mongo(verify_connectivity=verify_connectivity)
+        database = mongodb["steckruebe"]
+        if mongo_collection_name == "test" and "test" in database.list_collection_names():
+            database["test"].drop()
+        ScanContext.mongo_result_collection = database[mongo_collection_name]
+
+        if dummy_scanner:
+            ScanContext.scanner = DummyScanner()
+        else:
+            ScanContext.scanner = Zgrab2Scanner()
+
+        if create_indexes:
+            # prepare indexes
+            ScanContext.neo4j.execute_query("CREATE INDEX ip_lookup IF NOT EXISTS FOR (x:IP) ON (x.ip)")
+            ScanContext.neo4j.execute_query("CREATE INDEX domain_lookup IF NOT EXISTS FOR (x:DOMAIN) ON (x.domain)")
+            ScanContext.neo4j.execute_query(
+                "CREATE INDEX prefix_version_lookup IF NOT EXISTS FOR (x:PREFIX) ON (x.version)"
+            )
+
+            ScanContext.mongo_result_collection.create_index("domain_from")
+            ScanContext.mongo_result_collection.create_index("addr_from")
+            ScanContext.mongo_result_collection.create_index("version")
+            ScanContext.mongo_result_collection.create_index("status")
+
+
 class _Stats:
     def __init__(self) -> None:
-        self.domains = 0
-        self.targets = 0
+        self.domains = multiprocessing.Value("Q", 0)
+        self.targets = multiprocessing.Value("Q", 0)
         self.expected_domains = 0
         self.start_time = 0
         self.db = {}
@@ -45,10 +92,12 @@ class _Stats:
         self.expected_domains = expected_domains
 
     def done_domain(self):
-        self.domains += 1
+        with self.domains.get_lock():
+            self.domains.value += 1
 
     def done_targets(self, n):
-        self.targets += n
+        with self.targets.get_lock():
+            self.targets.value += n
 
     def performed_query(self, result: Result = None):
         callsite = inspect.stack()[2]
@@ -79,18 +128,18 @@ class _Stats:
 
     def __str__(self) -> str:
         elapsed = time.time() - self.start_time
-        if self.domains == 0:
+        if self.domains.value == 0:
             ETA = None
             DURATION = None
         else:
-            ETA = (self.expected_domains - self.domains) / (self.domains / elapsed)
+            ETA = (self.expected_domains - self.domains.value) / (self.domains.value / elapsed)
             DURATION = datetime.timedelta(seconds=elapsed + ETA)
             ETA = datetime.timedelta(seconds=ETA)
         ret = (
-            f"Total: {self.domains}/{self.expected_domains} domains, {self.targets} targets in {elapsed:.2f} seconds | "
-            f"{self.domains/elapsed:.2f} domains/s {100.0*self.domains/self.expected_domains:5.2f}% | "
+            f"Total: {self.domains.value}/{self.expected_domains} domains, {self.targets.value} targets in {elapsed:.2f} seconds | "
+            f"{self.domains.value/elapsed:.2f} domains/s {100.0*self.domains.value/self.expected_domains:5.2f}% | "
             f"ETA: {ETA} / Total: {DURATION} | "
-            f"{self.targets/elapsed:.2f} targets/s"
+            f"{self.targets.value/elapsed:.2f} targets/s"
         )
         if self.executed_queries > 0:
             ret += "\n"
@@ -113,6 +162,7 @@ class _Stats:
 
 
 STATS = _Stats()
+STATS_INTERVAL = 60
 
 
 def _stats_printer():
@@ -120,7 +170,7 @@ def _stats_printer():
         time.sleep(1)
     while True:
         print(STATS)
-        time.sleep(60)
+        time.sleep(STATS_INTERVAL)
 
 
 Thread(target=_stats_printer, daemon=True, name="Stats Printer").start()
@@ -295,20 +345,6 @@ class Zgrab2Scanner(Scanner):
 
         return cmd
 
-    def __init__(
-        self,
-        mongo_driver: MongoClient,
-        db_name="steckruebe",
-        collection_name=f"ticket_redirection_{datetime.datetime.now():%Y-%m-%d_%H:%M}",
-    ) -> None:
-        self.mongo_driver = mongo_driver
-        self.mongo_db = mongo_driver[db_name]
-        self.mongo_collection = self.mongo_db[collection_name]
-        self.mongo_collection.create_index("domain_from")
-        self.mongo_collection.create_index("addr_from")
-        self.mongo_collection.create_index("version")
-        self.mongo_collection.create_index("status")
-
     def scan(self, domain_from: str, addr_from: Connectable, target_addrs: list[Connectable], version):
         """
         This method implements the scanning of a domain and its targets.
@@ -330,7 +366,7 @@ class Zgrab2Scanner(Scanner):
             res = {"error": str(e), "traceback": traceback.format_exc()}
         assert isinstance(res, dict)
         try:
-            self.mongo_collection.insert_one(res)
+            ScanContext.mongo_result_collection.insert_one(res)
         except Exception as e:
             print(
                 f"Failed to insert result for {domain_from=} {addr_from=} {target_addrs=} {version=} into MongoDB: {e}"
@@ -342,11 +378,11 @@ class Zgrab2Scanner(Scanner):
             body = result["data"]["http"]["result"]["response"]["body"]
             # extract title from html body
             title = extract_title(body)
-            if len(title) > 1000:
+            if title and len(title) > 1000:
                 domain = result["domain"]
                 ip = result["ip"]
-                print(f"WARN: long title encountered ({domain}@{ip}) length: {len(title)}, truncating to 10.000")
-                title = title[:10_000]
+                print(f"WARN: long title encountered ({domain}@{ip}) length: {len(title)}, truncating to 2.000")
+                title = title[:2_000]
             result["data"]["http"]["result"]["response"]["content_title"] = title
             # if we keep the body for debugging, we truncate it a bit
             result["data"]["http"]["result"]["response"]["body"] = body[:10_000]
@@ -466,15 +502,13 @@ class Domain:
 
     def _evaluate_from_ip(
         self,
-        driver: Driver,
-        scanner: Scanner,
         source_ip: str,
         versions_to_evaluate=(ScanVersion.TLS1_3, ScanVersion.PRE_1_3),
     ):
         if set(versions_to_evaluate) > {ScanVersion.TLS1_3, ScanVersion.PRE_1_3}:
             raise ValueError("versions_to_evaluate must be a subset of {TLS1_3, PRE_1_3}")
 
-        with driver.session() as session:
+        with ScanContext.neo4j.session() as session:
             _QUERY = []
             for iptype in IPType:
                 for version in versions_to_evaluate:
@@ -503,16 +537,16 @@ class Domain:
         # This enables us to gather all bodies
         # if targets_13:
         if ScanVersion.TLS1_3 in versions_to_evaluate:
-            scanner.scan(self.domain, Connectable(source_ip, 443), targets_13, ScanVersion.TLS1_3)
+            ScanContext.scanner.scan(self.domain, Connectable(source_ip, 443), targets_13, ScanVersion.TLS1_3)
         # if targets_pre13:
         if ScanVersion.PRE_1_3 in versions_to_evaluate:
-            scanner.scan(self.domain, Connectable(source_ip, 443), targets_pre13, ScanVersion.PRE_1_3)
+            ScanContext.scanner.scan(self.domain, Connectable(source_ip, 443), targets_pre13, ScanVersion.PRE_1_3)
 
-    def _evaluate_in_iptype(self, driver: Driver, scanner: Scanner, tfrom: IPType):
+    def _evaluate_in_iptype(self, tfrom: IPType):
         if not isinstance(tfrom, IPType):
             raise TypeError("tfrom must be IPType")
 
-        with driver.session() as session:
+        with ScanContext.neo4j.session() as session:
             # get source IPs
             ips = session.run(
                 f"""
@@ -523,17 +557,16 @@ class Domain:
             )
 
             for source_ip in ips:
-                self._evaluate_from_ip(driver, scanner, source_ip[0])
+                self._evaluate_from_ip(source_ip[0])
 
-    def evaluate(self, driver: Driver, scanner: Scanner):
+    def evaluate(self):
         for tfrom in IPType:
-            self._evaluate_in_iptype(driver, scanner, tfrom)
-
+            self._evaluate_in_iptype(tfrom)
         STATS.done_domain()
 
 
-def get_domains(driver: Driver, cluster: int = None, limit: int = None):
-    with driver.session() as session:
+def get_domains(cluster: int = None, limit: int = None):
+    with ScanContext.neo4j.session() as session:
         if cluster is None:
             query = "MATCH (n: DOMAIN) RETURN n.domain AS domain"
         else:
@@ -555,75 +588,66 @@ def print_dummy_query():
     )
 
 
-def main(parallelize, create_indexes=True, profile=False):
+def main(parallelize, *, create_indexes=True, profile=False, dummy_scanner=False, explicit_collection=None):
+
+    ScanContext.initialize(
+        mongo_collection_name=explicit_collection,
+        create_indexes=create_indexes,
+        profile=profile,
+        dummy_scanner=dummy_scanner,
+    )
+
     # print_dummy_query()
 
-    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=neo4j_creds.as_tuple())
-    if profile:
-        neo4j_driver = _ProfileDriver(STATS, neo4j_driver, profile)
-
     # getting all domains takes a bit, but still reasonable | about 47 seconds for 620,076 domains
-
-    if create_indexes:
-        # prepare indexes
-        neo4j_driver.execute_query("CREATE INDEX ip_lookup IF NOT EXISTS FOR (x:IP) ON (x.ip)")
-        neo4j_driver.execute_query("CREATE INDEX domain_lookup IF NOT EXISTS FOR (x:DOMAIN) ON (x.domain)")
-        neo4j_driver.execute_query("CREATE INDEX prefix_version_lookup IF NOT EXISTS FOR (x:PREFIX) ON (x.version)")
-
-    # mongo_url = f"mongodb://{mongo_user}:{mongo_password}@snhebrok-eval.cs.upb.de:27018/?authSource=admin&readPreference=primary&appname=MongoDB+Compass&directConnection=true&ssl=true"
-    mongo_url = f"mongodb://{mongodb_creds.as_str()}@127.0.0.1:27017/?authSource=admin&readPreference=primary&directConnection=true&ssl=true"
-    print(f"Connecting to {mongo_url=}")
-    mongo_driver = MongoClient(mongo_url, tlsAllowInvalidCertificates=True)
-    mongo_driver.server_info()
-    print("Connected to MongoDB")
-    scanner = Zgrab2Scanner(mongo_driver=mongo_driver)
-    # scanner = DummyScanner()  # Test
 
     CLUSTER = None
     LIMIT = None
     # MATCH (n:DOMAIN) RETURN n.clusterID, count(n.clusterID) as c ORDER BY c DESC
     # CLUSTER = 393  # Test Cluster (2094 domains)
-    # LIMIT = 1000  # Test Limit
+    LIMIT = 1000  # Test Limit
 
     if (
         CLUSTER is not None
         or LIMIT is not None
-        or isinstance(scanner, DummyScanner)
+        or isinstance(ScanContext.scanner, DummyScanner)
         or profile
         or not parallelize
         or not create_indexes
+        or explicit_collection
     ):
-        print(f"TEST mode is active: {CLUSTER=}, {LIMIT=}, {scanner=}, {profile=}, {parallelize=}, {create_indexes=}")
+        global STATS_INTERVAL
+        STATS_INTERVAL = 10
+        print(
+            f"TEST mode is active: {CLUSTER=}, {LIMIT=}, {ScanContext.scanner=}, {profile=}, {parallelize=}, {create_indexes=}, {explicit_collection=}"
+        )
     else:
         print("Production Mode | gl;hf")
 
-    DOMAINS = set(get_domains(neo4j_driver, CLUSTER, LIMIT))
+    DOMAINS = set(get_domains(CLUSTER, LIMIT))
     print(f"Fetched {len(DOMAINS)} domains ({CLUSTER=}, {LIMIT=})")
     STATS.start(len(DOMAINS))
 
-    if parallelize:
+    if parallelize or parallelize is None:
         num_threads = None
-        if isinstance(parallelize, int):
+        if isinstance(parallelize, (int, type(None))):
             num_threads = parallelize
-        with ThreadPool(processes=num_threads) as pool:
-            pool.map(lambda d: d.evaluate(neo4j_driver, scanner), DOMAINS)
+        with ProcessPool(processes=num_threads) as pool:
+            pool.map(Domain.evaluate, DOMAINS)
     else:
         for domain in DOMAINS:
-            domain.evaluate(neo4j_driver, scanner)
+            domain.evaluate()
+
+    print("DONE")
+    print(STATS)
 
 
 def evaluate_missing_pairs(missing_domain_ip_pairs: dict[tuple[str, str], ScanVersion], parallelize, collection_name):
-    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=neo4j_creds.as_tuple())
-    mongo_url = f"mongodb://{mongodb_creds.as_str()}@127.0.0.1:27017/?authSource=admin&readPreference=primary&directConnection=true&ssl=true"
-    print(f"Connecting to {mongo_url=}")
-    mongo_driver = MongoClient(mongo_url, tlsAllowInvalidCertificates=True)
-    mongo_driver.server_info()
-    print("Connected to MongoDB")
-    scanner = Zgrab2Scanner(mongo_driver=mongo_driver, collection_name=collection_name)
+    raise NotImplementedError("broken since creating scancontext")
 
     def _evaluate_missing_domain(entry):
         (domain, ip), versions_to_evaluate = entry
-        Domain(domain)._evaluate_from_ip(neo4j_driver, scanner, ip, versions_to_evaluate)
+        Domain(domain)._evaluate_from_ip(scanner, ip, versions_to_evaluate)
         STATS.done_domain()
 
     STATS.start(len(missing_domain_ip_pairs))
@@ -632,7 +656,7 @@ def evaluate_missing_pairs(missing_domain_ip_pairs: dict[tuple[str, str], ScanVe
         if isinstance(parallelize, int):
             num_threads = parallelize
         with ThreadPool(processes=num_threads) as pool:
-            pool.map(_evaluate_missing_domain, missing_domain_ip_pairs.items())
+            pool.imap(_evaluate_missing_domain, missing_domain_ip_pairs.items())
     else:
         for entry in missing_domain_ip_pairs.items():
             _evaluate_missing_domain(entry)
@@ -670,9 +694,8 @@ def main_missing():
 
 
 def test(domain: str):
-    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=neo4j_creds.as_tuple())
-    scanner = DummyScanner()  # Test
-    Domain(domain).evaluate(neo4j_driver, scanner)
+    ScanContext.scanner = DummyScanner()
+    Domain(domain).evaluate()
 
 
 def test_with_zgrab(domain: str):
@@ -683,13 +706,22 @@ def test_with_zgrab(domain: str):
         def insert_one(self, data):
             print(data)
 
-    neo4j_driver = GraphDatabase.driver("bolt://localhost:7687", auth=neo4j_creds.as_tuple())
-    scanner = Zgrab2Scanner(mongo_driver=FakeMongoDriver())
-    Domain(domain).evaluate(neo4j_driver, scanner)
+    ScanContext.neo4j = connect_neo4j()
+    ScanContext.scanner = Zgrab2Scanner(mongo_driver=FakeMongoDriver())
+    Domain(domain).evaluate()
 
 
 if __name__ == "__main__":
     # test("latam.com")
     # test_with_zgrab("latam.com")
-    # main(64, True, False) # PROD
-    main(False, True, False)  # DEV
+    # main(64) # PROD
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-7s | %(process)d %(processName)s - %(name)s.%(funcName)s: %(message)s",
+    )
+    logging.getLogger("neo4j").setLevel(logging.WARNING)
+    main(
+        60,
+        dummy_scanner=False,
+        explicit_collection="test",
+    )  # DEV
