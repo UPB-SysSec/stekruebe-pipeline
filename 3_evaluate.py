@@ -2,6 +2,7 @@ import logging
 from pprint import pprint
 from neo4j import GraphDatabase
 from pymongo import MongoClient
+from bson import ObjectId
 from enum import Enum
 from dataclasses import dataclass
 from typing import Union, Optional
@@ -15,6 +16,7 @@ import time
 import datetime
 import functools
 import sys
+import utils.json_serialization as json
 
 
 # @functools.lru_cache(maxsize=1024 * 1024 * 10)
@@ -23,8 +25,24 @@ def levenstein_ratio(a, b):
     return Levenshtein.ratio(a, b)
 
 
+@dataclass
+class ComputedLevenshtein:
+    same_cert: bool
+    similarity: float
+
+    @staticmethod
+    def from_response(same_cert, a, b):
+        return ComputedLevenshtein(same_cert, levenstein_ratio(a, b))
+
+    def to_dict(self):
+        # dirty way to convert to serializable for DB
+        return json.loads(json.dumps(self))
+
+
 class Response:
     def __init__(self, zgrabHttpOutput):
+        self.levenshtein_distances: dict[str, ComputedLevenshtein] = None
+
         self._zgrabHttpOutput = zgrabHttpOutput
         self._ip = zgrabHttpOutput["ip"]
         if zgrabHttpOutput["data"]["http"].get("error", False):
@@ -107,8 +125,8 @@ class ResumptionClassification:
         return ResumptionClassification(ResumptionClassificationType.SAFE, reason)
 
     @staticmethod
-    def not_applicable(reason):
-        return ResumptionClassification(ResumptionClassificationType.NOT_APPLICABLE, reason)
+    def not_applicable(reason, a=None):
+        return ResumptionClassification(ResumptionClassificationType.NOT_APPLICABLE, reason, a)
 
     @staticmethod
     def unsafe(reason, a=None, b=None):
@@ -117,6 +135,80 @@ class ResumptionClassification:
     @staticmethod
     def assert_equal(a, b, reason):
         return ResumptionClassification(a == b, reason, a, b)
+
+    def to_dict(self):
+        # dirty way to convert to serializable for DB
+        return json.loads(json.dumps(self))
+
+
+@dataclass
+class LevenshteinResumptionClassification:
+    classification: ResumptionClassificationType
+    reason: str
+    initial_similarity: float
+    closest_same_cert_name: str
+    closest_same_cert_similarity: float
+    closest_diff_cert_name: str
+    closest_diff_cert_similarity: float
+    distances: dict[str, ComputedLevenshtein]
+
+    def __init__(self, similarities: dict[str, ComputedLevenshtein]):
+        assert "initial" in similarities
+        self.distances = similarities
+        self.initial_similarity = similarities["initial"].similarity
+        self.closest_same_cert_name = None
+        self.closest_same_cert_similarity = 0
+        self.closest_diff_cert_name = None
+        self.closest_diff_cert_similarity = 0
+        closest = similarities["initial"]
+        closest_is_initial = True
+        for key, value in similarities.items():
+            if key == "initial":
+                continue
+            if closest.similarity < value.similarity:
+                closest = value
+                closest_is_initial = False
+
+            if value.same_cert:
+                if value.similarity > self.closest_same_cert_similarity:
+                    self.closest_same_cert_name = key
+                    self.closest_same_cert_similarity = value.similarity
+            else:
+                if value.similarity > self.closest_diff_cert_similarity:
+                    self.closest_diff_cert_name = key
+                    self.closest_diff_cert_similarity = value.similarity
+
+        if closest.similarity > 0.5:
+            self.classification = ResumptionClassificationType.from_bool_is_safe(closest.same_cert)
+            if closest_is_initial:
+                assert self.classification == ResumptionClassificationType.SAFE
+                self.reason = "levenshtein: matched initial"
+            else:
+                if closest.same_cert:
+                    assert self.classification == ResumptionClassificationType.SAFE
+                    self.reason = "levenshtein: neighbor with same cert"
+                else:
+                    assert self.classification == ResumptionClassificationType.UNSAFE
+                    self.reason = "levenshtein: strongly matching neighbor with different cert"
+        else:
+            self.classification = ResumptionClassificationType.NOT_APPLICABLE
+            self.reason = "levenshtein: no good match"
+
+    def to_dict(self):
+        # dirty way to convert to serializable for DB
+        return json.loads(json.dumps(self))
+
+
+@dataclass
+class AnalyzedZgrab2ResumptionResult(Zgrab2ResumptionResult):
+    initial: Response = None
+    redirect: list[Response] = None
+
+    def __post_init__(self):
+        if self.initial:
+            self.initial = Response(self.initial)
+        if self.redirect:
+            self.redirect = [Response(r) for r in self.redirect]
 
 
 class _ProcessLocal:
@@ -284,17 +376,21 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
     closest_body, closest_cert = initial.body, initial.certificate
     max_r_is_initial = True
 
+    ratios = {"initial": ComputedLevenshtein(True, levenstein_ratio(initial.body, resumption.body))}
+
     # check all neighbors for levenshtein match - give us the thing we are most likely on
     # neighbor_domains = get_domain_neighborhood(domain_from)
     # TODO: store all computed ratios - then store the ratios of the closest match with the same cert and the closest match with a different cert
-    relevant_domains = get_domains_on_ip(resumption._ip) + extract_subjects(initial.parsed_certificate)
-    for n in relevant_domains:
-        for neighbor_body, neighbor_cert in unique(get_domain_body_and_cert(n)):
-            r = levenstein_ratio(resumption.body, neighbor_body)
-            if r > max_r:
-                closest_body, closest_cert = neighbor_body, neighbor_cert
-                max_r = r
-                max_r_is_initial = False
+    relevant_domains = set(get_domains_on_ip(resumption._ip) + extract_subjects(initial.parsed_certificate))
+    for neighbor_domain in relevant_domains:
+        for neighbor_body, neighbor_cert, neigbor_id in get_body_cert_id_for_domain(neighbor_domain):
+            key = f"{neighbor_domain}[{neigbor_id}]"
+            assert key not in ratios
+            ratios[key] = ComputedLevenshtein.from_response(
+                initial.certificate == neighbor_cert, resumption.body, neighbor_body
+            )
+
+    return LevenshteinResumptionClassification(ratios)
 
     # we actually consider this sufficiently close
     if max_r > _LEVENSHTEIN_THRESHOLD:
@@ -403,15 +499,7 @@ def get_domain_neighborhood(domain, limit=None):
     return d
 
 
-def unique(iterable):
-    seen = set()
-    for item in iterable:
-        if item not in seen:
-            seen.add(item)
-            yield item
-
-
-def get_domain_body_and_cert(domain):
+def get_body_cert_id_for_domain(domain):
     filter = {"domain_from": domain}
     project = {
         "body": "$initial.data.http.result.response.body",
@@ -419,64 +507,99 @@ def get_domain_body_and_cert(domain):
     }
 
     result = MongoCollection.get_collection().find(filter=filter, projection=project)
+    seen_body_certs = set()
     for r in result:
-        body, cert = r.get("body"), r.get("cert", {}).get("raw")
+        body = r.get("body")
+        cert = r.get("cert", {}).get("raw")
+        id = r.get("_id")
         if cert:
-            yield body, cert
+            ret = (body, cert)
+            if ret not in seen_body_certs:
+                seen_body_certs.add(ret)
+                yield body, cert, id
 
 
-problematic_domains = {
-    # should be fixed with title extraction
-    "bm.py",
-    # "pm.by",
-    # "glotgrx.com",
-    # "tradebrains.in",
-    # "komonews.com",  # potentially
-    # # cannot recreate, perhaps a temporary problem - TITLE_RE works
-    # "okcfox.com",
-    # # Routing problems
-    # "brand-display.com",
-    # # weird tlds and redirects to .com
-    # "shopee.com.mx",
-    # "shopee.com.my",
-    # # empty
-    # "redfastlabs.com",
-    # # should be fixed by title_extration
-    # "s-0005.dual-s-msedge.net",
-    # "wac-0003.wac-dc-msedge.net.wac-0003.wac-msedge.net",
-    # "ns1.a-msedge.net",  # fixed with content length?
-    # "meteogiornale.it",  # cannot reproduce - TODO: how to deal with HTTP 202
-    # # don't know what to do with you
-    # "ipv4.icanhazip.com",  # can only compare content I suppose
-    # "dis.criteo.com",  # doesnt even send html
-    # "www.affirm.com",
-}
+def get_body_cert_for_ids(ids: list):
+    filter = {"_id": {"$in": [ObjectId(bytes.fromhex(id)) for id in ids]}}
+    project = {
+        "body": "$initial.data.http.result.response.body",
+        "cert": "$initial.data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate",
+    }
+
+    result = MongoCollection.get_collection().find(filter=filter, projection=project)
+    for r in result:
+        id = r.get("_id")
+        body = r.get("body")
+        cert = r.get("cert", {}).get("raw")
+        if cert:
+            yield id.binary.hex(), (body, cert)
 
 
-def nop():
-    pass
-
-
-def analyze_item_iter(result: Zgrab2ResumptionResult):
-    initial: Response = result.initial
+def analyze_item_iter(result: AnalyzedZgrab2ResumptionResult):
     for redirected in result.redirect:
         # redirected: Response = redirected
         try:
-            yield classify_resumption(initial, redirected, result.domain_from)
+            yield classify_resumption(result.initial, redirected, result.domain_from)
         except Exception as e:
             logging.exception(
-                f"Error in classify_resumption ({result.domain_from}, {initial._ip} -> {redirected._ip}): {e}"
+                f"Error in classify_resumption ({result.domain_from}, {result.initial._ip} -> {redirected._ip}): {e}"
             )
             yield ResumptionClassification.not_applicable("exception occured")
 
 
 def analyze_item(doc):
+    doc_id = doc["_id"]
     del doc["_id"]
-    result = Zgrab2ResumptionResult(**doc)
-    result.initial = Response(result.initial)
-    for i, r in enumerate(result.redirect):
-        result.redirect[i] = Response(r)
-    return result, list(analyze_item_iter(result))
+    result = AnalyzedZgrab2ResumptionResult(**doc)
+    resumption_classifications = list(analyze_item_iter(result))
+
+    # compute levenshtein similarities for initial connection, may be useful to ultimately classify resumptions
+    id_to_domain = {}
+    ids = set()
+    for classification in resumption_classifications:
+        if isinstance(classification, LevenshteinResumptionClassification):
+            for key in classification.distances:
+                if "[" in key:
+                    domain, body_id = key.split("[", 1)
+                    body_id = body_id.rstrip("]")
+                    ids.add(body_id)
+                    id_to_domain[body_id] = domain
+    body_certs = dict(get_body_cert_for_ids(ids))
+
+    similarities = {}
+    farthest_same_cert_name = None
+    farthest_same_cert_similarity = None
+    closest_diff_cert_name = None
+    closest_diff_cert_similarity = None
+    for id in ids:
+        domain = id_to_domain[id]
+        body, cert = body_certs[id]
+        key = f"{domain}[{id}]"
+        current_levenshtein = ComputedLevenshtein.from_response(
+            result.initial.certificate == cert, result.initial.body, body
+        )
+        similarities[key] = current_levenshtein.to_dict()
+        if current_levenshtein.same_cert:
+            if not farthest_same_cert_similarity or current_levenshtein.similarity < farthest_same_cert_similarity:
+                farthest_same_cert_name = key
+                farthest_same_cert_similarity = current_levenshtein.similarity
+        else:
+            if not closest_diff_cert_similarity or current_levenshtein.similarity > closest_diff_cert_similarity:
+                closest_diff_cert_name = key
+                closest_diff_cert_similarity = current_levenshtein.similarity
+
+    if similarities:
+        similarities["farthest_same_cert_name"] = farthest_same_cert_name
+        similarities["farthest_same_cert_similarity"] = farthest_same_cert_similarity
+        similarities["closest_diff_cert_name"] = closest_diff_cert_name
+        similarities["closest_diff_cert_similarity"] = closest_diff_cert_similarity
+
+    update = {"$set": {"initial._similarities": similarities}}
+    for i, classification in enumerate(resumption_classifications):
+        update["$set"][f"redirect.{i}._classification"] = classification.to_dict()
+    MongoCollection.get_collection().update_one({"_id": doc_id}, update, upsert=False)
+
+    return result, resumption_classifications
 
 
 def limit(iterable, limit):
@@ -486,66 +609,66 @@ def limit(iterable, limit):
         yield item
 
 
+def cleanup_db():
+    logging.info("Cleaning up DB")
+    docs_cleant_up = 0
+    fields_removed = 0
+    for doc in MongoCollection.get_collection().find({"initial._similarities": {"$exists": True}}):
+        fields_to_remove = {"initial._similarities"}
+        for i, redirect in enumerate(doc["redirect"]):
+            if "_classification" in redirect:
+                fields_to_remove.add(f"redirect.{i}._classification")
+        update = {"$unset": {x: 1 for x in fields_to_remove}}
+        fields_removed += len(fields_to_remove)
+        docs_cleant_up += 1
+        logging.debug(f"Cleaning up {doc['_id']}: removing {fields_to_remove}")
+        MongoCollection.get_collection().update_one({"_id": doc["_id"]}, update, upsert=False)
+    logging.info(f"Cleaned up {docs_cleant_up} documents, removed {fields_removed} fields")
+
+
 def analyze_collection(collection):
+    MongoCollection.get_collection().create_index("initial._similarities", sparse=True)
     results = {type: dict() for type in ResumptionClassificationType}
     db_items = collection.find({"status": "SUCCESS"})
     _COUNT = collection.count_documents({"status": "SUCCESS"})
     _START = time.time()
     _NUM = 0
     _LAST_PRINT = _START
+
+    # cleanup_db()
+    # return
+    logging.info("Starting")
     with ProcessPool() as pool:
-        for result, classifications in pool.imap(analyze_item, db_items):
+        # with ThreadPool(1) as pool:
+        for result, classifications in pool.imap_unordered(analyze_item, db_items):
             _NUM += 1
             if _NUM % 1000 == 0 or time.time() - _LAST_PRINT > 60:
                 _LAST_PRINT = time.time()
                 ETA = datetime.timedelta(seconds=(_COUNT - _NUM) / (_NUM / (time.time() - _START)))
+                pprint(results, stream=sys.stderr)
+                sys.stderr.flush()
                 print(
                     f"Processed {_NUM:}/{_COUNT} ({_NUM/_COUNT:6.2%}) in {time.time()-_START:.2f}s | {_NUM/(time.time()-_START):.2f} items/s | ETA {ETA}",
                 )
                 sys.stdout.flush()
-                pprint(results, stream=sys.stderr)
-                sys.stderr.flush()
 
-            found = False
-            # if not all(c.is_safe for c in classifications):
-            #     print("#" * 80)
-            initial = result.initial
             for i, classification in enumerate(classifications):
                 redirected = result.redirect[i]
 
                 result_type = results.get(classification.classification)
-                if classification.reason in result_type:
-                    result_type[classification.reason] += 1
-                else:
-                    result_type[classification.reason] = 0
-
-                if False and not classification.is_safe:
-                    if found:
-                        print("-" * 80)
-                    found = True
-                    print("We got a connection to a different server without authentication")
-                    print(
-                        f"Ticket from {result.domain_from} at {initial._ip} -> {redirected._ip} in {result.version} | Detected with {classification.reason}"
+                reason = classification.reason
+                if isinstance(classification, LevenshteinResumptionClassification):
+                    reason_suffix = " | ".join(
+                        (
+                            f"closest_same {classification.closest_same_cert_similarity:.1f}",
+                            f"closest_diff {classification.closest_diff_cert_similarity:.1f}",
+                            f"initial {classification.initial_similarity:.1f}",
+                        )
                     )
-                    print("Value Initial   :", repr(classification.value_initial)[:50])
-                    print("Value Resumption:", repr(classification.value_redirect)[:50])
-                    print("Initial   :", initial)
-                    print("Resumption:", redirected)
-                    # print(
-                    #     f'create_test("scan", Remote("{result.domain_from}", "{initial._ip}"), Remote(None, "{redirected._ip}"), create_reversed=False)'
-                    # )
-                    #         print(
-                    #             f"""
-                    # host_ticket = Remote("{result.domain_from}", "{initial._ip}")
-                    # host_resumption = Remote("{redirected._ip}")""".strip(
-                    #                 "\n"
-                    #             )
-                    #         )
-                    print(f"{result.domain_from}@{initial._ip}|{redirected._ip}")
-                    if classification.reason == "unsure":
-                        # if result.domain_from not in problematic_domains:
-                        #     classify_resumption(initial, redirected, result.domain_from)
-                        problematic_domains.add(result.domain_from)
+                    reason += f" [{reason_suffix}]"
+                if reason not in result_type:
+                    result_type[reason] = 0
+                result_type[reason] += 1
     print("#" * 80)
     pprint(results)
 
