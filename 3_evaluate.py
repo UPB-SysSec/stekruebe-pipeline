@@ -14,7 +14,7 @@ import os
 import time
 import datetime
 import functools
-import base64
+import sys
 
 
 # @functools.lru_cache(maxsize=1024 * 1024 * 10)
@@ -43,7 +43,7 @@ class Response:
         self.status_code = self._response.get("status_code", -1)
         self.body_sha256 = self._response.get("body_sha256", None)
         self.body = self._response.get("body", None)
-        self.body_len = len(self.body) if self.body else None
+        self.body_len = self._response.get("body_len", None)
         self.content_title = self._response.get("content_title", None)
         self.content_length = self._response.get("content_length", None)
         self.location = self._response.get("headers", {}).get("location", [])
@@ -224,8 +224,10 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
     if not resumption.resumed:
         return ResumptionClassification.safe("no resumption")
     # initial was error - ignore
-    if initial.status_code < 0 or resumption.status_code < 0:
-        return ResumptionClassification.not_applicable("initial or redirect was complete error")
+    if initial.status_code < 0:
+        return ResumptionClassification.not_applicable("initial was complete error")
+    if resumption.status_code < 0:
+        return ResumptionClassification.not_applicable("redirect was complete error")
     if initial.status_code > 400:
         return ResumptionClassification.not_applicable("initial was error")
 
@@ -277,27 +279,34 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
 
     _LEVENSHTEIN_THRESHOLD = 0.5
 
-    min_r = 0
-    closest_body, closest_cert = None, None
+    # compare initial and resumption body by levenshtein
+    max_r = levenstein_ratio(initial.body, resumption.body)
+    closest_body, closest_cert = initial.body, initial.certificate
+    max_r_is_initial = True
 
     # check all neighbors for levenshtein match - give us the thing we are most likely on
     # neighbor_domains = get_domain_neighborhood(domain_from)
+    # TODO: store all computed ratios - then store the ratios of the closest match with the same cert and the closest match with a different cert
     relevant_domains = get_domains_on_ip(resumption._ip) + extract_subjects(initial.parsed_certificate)
     for n in relevant_domains:
         for neighbor_body, neighbor_cert in unique(get_domain_body_and_cert(n)):
-            r = levenstein_ratio(initial.body, neighbor_body)
-            if r > min_r:
+            r = levenstein_ratio(resumption.body, neighbor_body)
+            if r > max_r:
                 closest_body, closest_cert = neighbor_body, neighbor_cert
-                min_r = r
+                max_r = r
+                max_r_is_initial = False
 
     # we actually consider this sufficiently close
-    if min_r > _LEVENSHTEIN_THRESHOLD:
+    if max_r > _LEVENSHTEIN_THRESHOLD:
         assert type(closest_cert) == str
         assert type(initial.certificate) == str
+        if max_r_is_initial:
+            return ResumptionClassification.safe("levenshtein: matched initial")
+
         if closest_cert != initial.certificate:
-            return ResumptionClassification.unsafe("strongly matching neighbor with different cert")
+            return ResumptionClassification.unsafe("levenshtein: strongly matching neighbor with different cert")
         else:
-            return ResumptionClassification.safe("levenshtein neighbor with same cert")
+            return ResumptionClassification.safe("levenshtein: neighbor with same cert")
 
     # if initial.body and resumption.body:
     #     if Levenshtein.ratio(initial.body, resumption.body) > _LEVENSHTEIN_THRESHOLD:
@@ -491,8 +500,11 @@ def analyze_collection(collection):
                 _LAST_PRINT = time.time()
                 ETA = datetime.timedelta(seconds=(_COUNT - _NUM) / (_NUM / (time.time() - _START)))
                 print(
-                    f"Processed {_NUM:}/{_COUNT} ({_NUM/_COUNT:6.2%}) in {time.time()-_START:.2f}s | {_NUM/(time.time()-_START):.2f} items/s | ETA {ETA}"
+                    f"Processed {_NUM:}/{_COUNT} ({_NUM/_COUNT:6.2%}) in {time.time()-_START:.2f}s | {_NUM/(time.time()-_START):.2f} items/s | ETA {ETA}",
                 )
+                sys.stdout.flush()
+                pprint(results, stream=sys.stderr)
+                sys.stderr.flush()
 
             found = False
             # if not all(c.is_safe for c in classifications):
