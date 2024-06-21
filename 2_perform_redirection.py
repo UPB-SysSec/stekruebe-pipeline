@@ -283,6 +283,7 @@ class ZgrabHelper:
 ZGRAB2_FILTER = JsonFilter(
     "data.http.result.*",
     "!data.http.result.response.body",
+    "!data.http.result.response.body_len",
     "!data.http.result.response.status_code",
     "!data.http.result.response.status_line",
     "!data.http.result.response.headers",
@@ -385,6 +386,7 @@ class Zgrab2Scanner(Scanner):
                 title = title[:2_000]
             result["data"]["http"]["result"]["response"]["content_title"] = title
             # if we keep the body for debugging, we truncate it a bit
+            result["data"]["http"]["result"]["response"]["body_len"] = len(body)
             result["data"]["http"]["result"]["response"]["body"] = body[:10_000]
         except KeyError:
             pass
