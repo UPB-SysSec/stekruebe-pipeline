@@ -114,3 +114,10 @@ def connect_neo4j(creds=..., verify_connectivity=True) -> _neo4j_GraphDatabase:
     if verify_connectivity:
         neo4j_driver.verify_connectivity()
     return neo4j_driver
+
+
+def get_most_recent_collection_name(db: _MongoDatabase, collection_prefix: str):
+    # assumes that a timestamp is used as suffix
+    collections = db.list_collection_names()
+    collections = [c for c in collections if c.startswith(collection_prefix)]
+    return sorted(collections, reverse=True)[0]

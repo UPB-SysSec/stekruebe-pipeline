@@ -1,7 +1,6 @@
 import logging
 from pprint import pprint
 from neo4j import GraphDatabase
-from pymongo import MongoClient
 from bson import ObjectId
 from enum import Enum
 from dataclasses import dataclass
@@ -17,6 +16,28 @@ import datetime
 import functools
 import sys
 import utils.json_serialization as json
+from utils.db import MongoDB, MongoCollection, Neo4j, connect_mongo, connect_neo4j, get_most_recent_collection_name
+from pymongo.collection import Collection
+from urllib.parse import urlparse
+
+
+class ScanContext:
+    neo4j: GraphDatabase = None
+    mongo_collection: Collection = None
+
+    @staticmethod
+    def initialize(mongo_collection_name=None, *, verify_connectivity=True):
+
+        ScanContext.neo4j = connect_neo4j(verify_connectivity=verify_connectivity)
+
+        mongodb = connect_mongo(verify_connectivity=verify_connectivity)
+        database = mongodb["steckruebe"]
+        if not mongo_collection_name:
+            mongo_collection_name = get_most_recent_collection_name(database, "ticket_redirection_")
+            logging.info(f"Using most recent collection: {mongo_collection_name}")
+        if not mongo_collection_name:
+            raise ValueError("Could not determine most recent collection")
+        ScanContext.mongo_collection = database[mongo_collection_name]
 
 
 # @functools.lru_cache(maxsize=1024 * 1024 * 10)
@@ -68,10 +89,6 @@ class Response:
         assert len(self.location) < 2
         self.location = self.location[0] if self.location else None
 
-        # filter location
-        if self.location and self.location.startswith("/sttc/px/captcha-v2/index.html?url=Lz8"):
-            self.location = "/sttc/px/captcha-v2/index.html?url=Lz8"
-
     def __str__(self) -> str:
         sha_format = f"{self.body_sha256:.6s}" if self.body_sha256 else "None"
         return f"Response(status_code={self.status_code!r}, body_sha256={sha_format}, content_title={self.content_title!r:.50}, content_length={self.content_length!r}, body_len={self.body_len!r}, location={self.location!r})"
@@ -121,12 +138,12 @@ class ResumptionClassification:
         return self.classification.is_safe
 
     @staticmethod
-    def safe(reason):
-        return ResumptionClassification(ResumptionClassificationType.SAFE, reason)
+    def safe(reason, a=None, b=None):
+        return ResumptionClassification(ResumptionClassificationType.SAFE, reason, a, b)
 
     @staticmethod
-    def not_applicable(reason, a=None):
-        return ResumptionClassification(ResumptionClassificationType.NOT_APPLICABLE, reason, a)
+    def not_applicable(reason, a=None, b=None):
+        return ResumptionClassification(ResumptionClassificationType.NOT_APPLICABLE, reason, a, b)
 
     @staticmethod
     def unsafe(reason, a=None, b=None):
@@ -135,6 +152,10 @@ class ResumptionClassification:
     @staticmethod
     def assert_equal(a, b, reason):
         return ResumptionClassification(a == b, reason, a, b)
+
+    @staticmethod
+    def assert_true(truthy, a, b, reason):
+        return ResumptionClassification(bool(truthy), reason, a, b)
 
     def to_dict(self):
         # dirty way to convert to serializable for DB
@@ -211,88 +232,6 @@ class AnalyzedZgrab2ResumptionResult(Zgrab2ResumptionResult):
             self.redirect = [Response(r) for r in self.redirect]
 
 
-class _ProcessLocal:
-    _pid = None
-
-    def __init__(self):
-        raise Exception("Class not instanced")
-
-    @classmethod
-    def is_same_pid(cls):
-        return cls._pid == os.getpid()
-
-    @classmethod
-    def store_pid(cls):
-        cls._pid = os.getpid()
-
-
-# Process local singleton for Neo4J Access
-class Neo4JDatabase(_ProcessLocal):
-    db_driver = None
-    _conneciton_uri = None
-    _connection_auth = None
-
-    @classmethod
-    def get_connection(cls, uri=..., auth=...):
-        if not cls.is_same_pid() or cls.db_driver is None:
-            cls.store_pid()
-            if uri is not ...:
-                logging.debug(f"Storing uri")
-                cls._conneciton_uri = uri
-            if auth is not ...:
-                logging.debug(f"Storing auth")
-                cls._connection_auth = auth
-            logging.debug(f"Connecting to Neo4J at {cls._conneciton_uri}")
-            cls.db_driver = GraphDatabase.driver(cls._conneciton_uri, auth=cls._connection_auth)
-        return cls.db_driver
-
-
-def remove_password(uri: str):
-    import urllib.parse
-
-    parsed = urllib.parse.urlparse(uri)
-    if parsed.password:
-        parsed = parsed._replace(netloc="{}:{}@{}".format(parsed.username, "***", parsed.hostname))
-    return parsed.geturl()
-
-
-# Process local for MongoDB Access
-class MongoCollection(_ProcessLocal):
-    db_driver = None
-    collection = None
-    _connection_uri = None
-    _connection_kwargs = None
-    _collection_database = None
-    _collection_name = None
-
-    def __init__(self):
-        raise Exception("Class not instanced")
-
-    @classmethod
-    def get_connection(cls, uri=..., **kwargs):
-        if not cls.is_same_pid() or cls.db_driver is None:
-            cls.store_pid()
-            if uri is not ...:
-                logging.debug(f"Storing uri and kwargs")
-                cls._connection_uri = uri
-                cls._connection_kwargs = kwargs
-            logging.debug(f"Connecting to MongoDB at {remove_password(cls._connection_uri)}")
-            if not cls._connection_uri:
-                raise Exception("No URI set")
-            cls.db_driver = MongoClient(cls._connection_uri, **cls._connection_kwargs)
-        return cls.db_driver
-
-    @classmethod
-    def get_collection(cls, database=..., collection=...):
-        if not cls.is_same_pid() or not cls.collection or collection:
-            if database is not ...:
-                cls._collection_database = database
-            if collection is not ...:
-                cls._collection_name = collection
-            cls.collection = cls.get_connection()[cls._collection_database][cls._collection_name]
-        return cls.collection
-
-
 def extract_subjects(parsed_cert):
     subjects = []
     if not parsed_cert:
@@ -309,6 +248,12 @@ def extract_subjects(parsed_cert):
     subjects = [s.lstrip("*.") for s in subjects]
     subjects = subjects + [f"www.{s}" for s in subjects if not s.startswith("www.")]
     return list(set(subjects))
+
+
+def are_same_origin(url1, url2):
+    p1 = urlparse(url1)
+    p2 = urlparse(url2)
+    return p1.scheme == p2.scheme and p1.port == p2.port and p1.hostname == p2.hostname
 
 
 def classify_resumption(initial: Response, resumption: Response, domain_from: str):
@@ -338,11 +283,21 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
 
     # initially we were redirected ...
     if initial.status_code in range(300, 400):
-        assert initial.location
+        if not initial.location:
+            return ResumptionClassification.not_applicable("initial redirection had no location set")
         if resumption.status_code in range(300, 400):
-            assert resumption.location
+            if not resumption.location:
+                return ResumptionClassification.not_applicable("resumption redirection had no location set")
             # ... on resumption as well - was the location the same?
-            return ResumptionClassification.assert_equal(initial.location, resumption.location, "location")
+            if initial.location == resumption.location:
+                return ResumptionClassification.safe("location", initial.location, resumption.location)
+            # or at least same origin?
+            return ResumptionClassification.assert_true(
+                are_same_origin(initial.location, resumption.location),
+                initial.location,
+                resumption.location,
+                "location SOP",
+            )
         # ... but not on resumption - which means the server is handling us differently
         return ResumptionClassification.unsafe(
             "initial was redirect, resumption was not",
@@ -353,12 +308,35 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
     # if resumption 300 and initial 200 check redirect to original
     if resumption.status_code in range(300, 400):
         assert resumption.location
-        if resumption.location in [f"https://{domain_from}"] or resumption.location.startswith(
-            f"https://{domain_from}/"
-        ):
-            return ResumptionClassification.safe("redirect to original")
-        else:
-            return ResumptionClassification.unsafe("redirect to different", domain_from, resumption.location)
+        parsed_location = urlparse(resumption.location.lower())
+        if not parsed_location.hostname and not parsed_location.scheme:
+            # relative path -> NA
+            return ResumptionClassification.not_applicable("relative redirect on resumption", b=resumption.location)
+
+        if parsed_location.netloc == domain_from:
+            if parsed_location.scheme == "https":
+                return ResumptionClassification.safe("redirect to original (https)", b=resumption.location)
+            if parsed_location.scheme == "http":
+                return ResumptionClassification.safe("redirect to original (http)", b=resumption.location)
+            if not parsed_location.scheme:
+                return ResumptionClassification.safe(
+                    "redirect to original (no scheme/implicit https)", b=resumption.location
+                )
+            return ResumptionClassification.not_applicable("redirect to original (other scheme)", b=resumption.location)
+        if parsed_location.netloc == "www." + domain_from:
+            if parsed_location.scheme == "https":
+                return ResumptionClassification.safe("redirect to www.original (https)", b=resumption.location)
+            if parsed_location.scheme == "http":
+                return ResumptionClassification.safe("redirect to www.original (http)", b=resumption.location)
+            if not parsed_location.scheme:
+                return ResumptionClassification.safe(
+                    "redirect to www.original (no scheme/implicit https)", b=resumption.location
+                )
+            return ResumptionClassification.not_applicable(
+                "redirect to www.original (other scheme)", b=resumption.location
+            )
+
+        return ResumptionClassification.unsafe("redirect to different", None, resumption.location)
 
     if initial.body_sha256 is not None and initial.body_sha256 == resumption.body_sha256:
         # same content
@@ -478,9 +456,8 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
 
 def get_domains_on_ip(ip):
     _QUERY = """MATCH (x:DOMAIN)--(y:IP {{ip: "{ip}"}}) RETURN DISTINCT x"""
-    neo4j_driver = Neo4JDatabase.get_connection()
     query = _QUERY.format(ip=ip)
-    records, summary, keys = neo4j_driver.execute_query(query)
+    records, summary, keys = ScanContext.neo4j.execute_query(query)
     d = [r.data()["x"]["domain"] for r in records]
     logging.debug(f"Got {len(d)} domains on {ip}")
     return d
@@ -491,9 +468,8 @@ def get_domain_neighborhood(domain, limit=None):
     if limit:
         assert isinstance(limit, int)
         _QUERY += f" LIMIT {limit}"
-    neo4j_driver = Neo4JDatabase.get_connection()
     query = _QUERY.format(base_domain=domain, limit=limit)
-    records, summary, keys = neo4j_driver.execute_query(query)
+    records, summary, keys = ScanContext.neo4j.execute_query(query)
     d = [r.data()["z"]["domain"] for r in records]
     logging.debug(f"Got {len(d)} neighbors for {domain}")
     return d
@@ -506,7 +482,7 @@ def get_body_cert_id_for_domain(domain):
         "cert": "$initial.data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate",
     }
 
-    result = MongoCollection.get_collection().find(filter=filter, projection=project)
+    result = ScanContext.mongo_collection.find(filter=filter, projection=project)
     seen_body_certs = set()
     for r in result:
         body = r.get("body")
@@ -526,7 +502,7 @@ def get_body_cert_for_ids(ids: list):
         "cert": "$initial.data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate",
     }
 
-    result = MongoCollection.get_collection().find(filter=filter, projection=project)
+    result = ScanContext.mongo_collection.find(filter=filter, projection=project)
     for r in result:
         id = r.get("_id")
         body = r.get("body")
@@ -547,7 +523,7 @@ def analyze_item_iter(result: AnalyzedZgrab2ResumptionResult):
             yield ResumptionClassification.not_applicable("exception occured")
 
 
-def analyze_item(doc):
+def analyze_item(doc, insert_result: bool = True):
     doc_id = doc["_id"]
     del doc["_id"]
     result = AnalyzedZgrab2ResumptionResult(**doc)
@@ -597,7 +573,8 @@ def analyze_item(doc):
     update = {"$set": {"initial._similarities": similarities}}
     for i, classification in enumerate(resumption_classifications):
         update["$set"][f"redirect.{i}._classification"] = classification.to_dict()
-    MongoCollection.get_collection().update_one({"_id": doc_id}, update, upsert=False)
+    if insert_result:
+        ScanContext.mongo_collection.update_one({"_id": doc_id}, update, upsert=False)
 
     return result, resumption_classifications
 
@@ -613,7 +590,7 @@ def cleanup_db():
     logging.info("Cleaning up DB")
     docs_cleant_up = 0
     fields_removed = 0
-    for doc in MongoCollection.get_collection().find({"initial._similarities": {"$exists": True}}):
+    for doc in ScanContext.mongo_collection.find({"initial._similarities": {"$exists": True}}):
         fields_to_remove = {"initial._similarities"}
         for i, redirect in enumerate(doc["redirect"]):
             if "_classification" in redirect:
@@ -622,15 +599,17 @@ def cleanup_db():
         fields_removed += len(fields_to_remove)
         docs_cleant_up += 1
         logging.debug(f"Cleaning up {doc['_id']}: removing {fields_to_remove}")
-        MongoCollection.get_collection().update_one({"_id": doc["_id"]}, update, upsert=False)
+        ScanContext.mongo_collection.update_one({"_id": doc["_id"]}, update, upsert=False)
     logging.info(f"Cleaned up {docs_cleant_up} documents, removed {fields_removed} fields")
 
 
-def analyze_collection(collection):
-    MongoCollection.get_collection().create_index("initial._similarities", sparse=True)
-    results = {type: dict() for type in ResumptionClassificationType}
-    db_items = collection.find({"status": "SUCCESS"})
-    _COUNT = collection.count_documents({"status": "SUCCESS"})
+def analyze_collection(collection_filter=...):
+    if collection_filter is ...:
+        collection_filter = {"status": "SUCCESS"}
+    ScanContext.mongo_collection.create_index("initial._similarities", sparse=True)
+    results = {typ: dict() for typ in ResumptionClassificationType}
+    db_items = ScanContext.mongo_collection.find(collection_filter)
+    _COUNT = ScanContext.mongo_collection.count_documents(collection_filter)
     _START = time.time()
     _NUM = 0
     _LAST_PRINT = _START
@@ -673,29 +652,39 @@ def analyze_collection(collection):
     pprint(results)
 
 
-def main():
-    mongo_url = f"mongodb://{mongodb_creds.as_str()}@127.0.0.1:27017/?authSource=admin&readPreference=primary&directConnection=true&ssl=true"
-    logging.info(f"Connecting to MongoDB")
-    mongo_driver = MongoCollection.get_connection(mongo_url, tlsAllowInvalidCertificates=True)
-    mongo_driver.server_info()
-    logging.info("Main Process connected to MongoDB")
+def main(collection_name=None, collection_filter=...):
+    ScanContext.initialize(collection_name, verify_connectivity=True)
+    analyze_collection(collection_filter=collection_filter)
 
-    neo4j_url = f"bolt://localhost:7687"
-    logging.info(f"Connecting to Neo4J")
-    neo4j_driver = Neo4JDatabase.get_connection(neo4j_url, auth=neo4j_creds.as_tuple())
-    neo4j_driver.verify_connectivity()
-    logging.info("Main Process connected to Neo4J")
 
-    db = mongo_driver["steckruebe"]
-    collection_name = "ticket_redirection_2024-06-12 19:41:10.680922"
-    if collection_name:
-        collection = MongoCollection.get_collection(database="steckruebe", collection=collection_name)
-        analyze_collection(collection)
-    else:
-        for collection_name in db.list_collection_names():
-            collection = MongoCollection.get_collection(database="steckruebe", collection=collection_name)
-            logging.info(f"Collection: {collection_name}")
-            analyze_collection(collection)
+def test():
+    from tqdm import tqdm
+
+    ScanContext.initialize("ticket_redirection_2024-06-12 19:41:10.680922")
+    collection_filter = {
+        "redirect": {
+            "$elemMatch": {
+                # "_classification.classification": "NOT_APPLICABLE",
+                # "_classification.reason": "exception occured",
+                "_classification.classification": "UNSAFE",
+                "_classification.reason": "location",
+            }
+        }
+    }
+    db_items = ScanContext.mongo_collection.find(collection_filter)
+    _COUNT = ScanContext.mongo_collection.count_documents(collection_filter)
+
+    results = {typ: dict() for typ in ResumptionClassificationType}
+    for item in tqdm(db_items, total=_COUNT):
+        _, classifications = analyze_item(item, insert_result=False)
+        for classification in classifications:
+            result_type = results.get(classification.classification)
+            reason = classification.reason
+            if reason not in result_type:
+                result_type[reason] = 0
+            result_type[reason] += 1
+    print("DONE")
+    pprint(results)
 
 
 if __name__ == "__main__":
