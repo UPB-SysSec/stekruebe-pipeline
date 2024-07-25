@@ -8,3 +8,6 @@ test.json
 __pycache__
 *.pyc
 credentials
+99_z1_initial.html
+99_z2_redirected.html
+trie.pickle
