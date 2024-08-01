@@ -66,6 +66,20 @@ class JsonFilterTree:
         else:
             self.value = object
 
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # cleanup
+        if isinstance(self.children, dict):
+            for child in self.children.values():
+                child.__exit__(exc_type, exc_val, exc_tb)
+        elif isinstance(self.children, list):
+            for child in self.children:
+                child.__exit__(exc_type, exc_val, exc_tb)
+        self.children = None
+        self.parent = None
+
     @property
     def keep(self):
         return self._keep
@@ -142,14 +156,14 @@ class Filter:
         if isinstance(item, str):
             raise TypeError("Filter.apply() does not support str input; maybe use apply_str")
 
-        item_tree = JsonFilterTree(item)
-        for pattern in self.filters:
-            inclusion_pattern = pattern.startswith("!")
-            # DEBUG(pattern)
-            if inclusion_pattern:
-                pattern = pattern[1:]
-            item_tree.set_keep(JsonPath(pattern), inclusion_pattern)
-        return item_tree.flatten()
+        with JsonFilterTree(item) as item_tree:
+            for pattern in self.filters:
+                inclusion_pattern = pattern.startswith("!")
+                # DEBUG(pattern)
+                if inclusion_pattern:
+                    pattern = pattern[1:]
+                item_tree.set_keep(JsonPath(pattern), inclusion_pattern)
+            return item_tree.flatten()
 
     def apply_str_out(self, item):
         return json.dumps(self.apply(item))

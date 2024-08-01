@@ -7,12 +7,13 @@ import threading
 
 
 class MemoryMonitor(threading.Thread):
-    def __init__(self, poll_interval=60, key_type="lineno", limit=5) -> None:
+    def __init__(self, poll_interval=60, key_type="lineno", limit=5, trace_depth=...) -> None:
         super().__init__(name="MemoryMonitor", daemon=True)
         self.poll_interval = poll_interval
         self.queue = Queue()
         self.key_type = key_type
         self.limit = limit
+        self.trace_depth = trace_depth
 
         self.last_stats = None
 
@@ -131,9 +132,12 @@ class MemoryMonitor(threading.Thread):
         self.last_stats = snapshot
 
     def run(self):
-        trace_depth = 1
-        if self.key_type == "traceback":
-            trace_depth = 4
+        if self.trace_depth is ...:
+            trace_depth = 1
+            if self.key_type == "traceback":
+                trace_depth = 4
+        else:
+            trace_depth = self.trace_depth
         tracemalloc.start(trace_depth)
         while True:
             try:
