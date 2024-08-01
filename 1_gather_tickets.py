@@ -388,9 +388,12 @@ class MapIPsToDomains(CacheableStage[list[tuple[str, str]]]):
         for line in resolved_domains:
             item = json.loads(line)
             domanin = item.get("name")
+            item_data = item.get("data", {})
+            if item_data is None:
+                item_data = {}
             for ip in chain(
-                item.get("data", {}).get("ipv4_addresses", []),
-                item.get("data", {}).get("ipv6_addresses", []),
+                item_data.get("ipv4_addresses", []),
+                item_data.get("ipv6_addresses", []),
             ):
                 if ip not in ips_to_domains:
                     ips_to_domains[ip] = []
@@ -675,17 +678,17 @@ class PostProcessZGrab(Stage[None]):
 
 
 class CONST:
-    IPv6SRC = "2001:638:502:28::51"
+    IPv6SRC = "2001:638:502:ce18::6"
     ZGRAB_CONNECTIONS_PER_HOST = 5
 
 
 class EXEUTABLES:
     JQ = "jq"
     CUT = "cut"
-    ZDNS = "/root/zdns/zdns"
-    ZMAP4 = "/root/zmap/src/zmap"
-    ZMAP6 = "/root/zmapv6/src/zmap"
-    ZGRAB = "/data/cdn_ticket/zgrab2"
+    ZDNS = "zdns"
+    ZMAP4 = "zmap"
+    ZMAP6 = "zmapv6"
+    ZGRAB = "zgrab2_tls13"
 
 
 if not op.isdir("out"):
@@ -693,7 +696,7 @@ if not op.isdir("out"):
 
 
 class FILES:
-    TRANCO = "tranco_LJ7W4.csv"
+    TRANCO = "../tranco_G6KVK.csv"
     BLOCKLIST_4 = "/data/Crawling-Blacklist/blacklist.txt"
     BLOCKLIST_6 = "/data/Crawling-Blacklist/blacklist-ipv6.txt"
 
