@@ -42,18 +42,55 @@ class ScanContext:
 
 # @functools.lru_cache(maxsize=1024 * 1024 * 10)
 @functools.wraps(Levenshtein.ratio)
-def levenstein_ratio(a, b):
+def levenshtein_ratio(a, b):
     return Levenshtein.ratio(a, b)
 
 
+def levenstein_header_ratio(a, b):
+    # FIXME @mradoy
+    return levenshtein_ratio(a[:100], b[:100])
+
+
 @dataclass
-class ComputedLevenshtein:
+class ComputedMetrics:
     same_cert: bool
-    similarity: float
+    levensthtein_similarity: float
+    levensthtein_header_similarity: float
 
     @staticmethod
-    def from_response(same_cert, a, b):
-        return ComputedLevenshtein(same_cert, levenstein_ratio(a, b))
+    def from_response(same_cert, body_resumption, body_other):
+        return ComputedMetrics(
+            same_cert=same_cert,
+            levensthtein_similarity=levenshtein_ratio(body_resumption, body_other),
+            levensthtein_header_similarity=levenstein_header_ratio(body_resumption, body_other),
+        )
+
+    def to_dict(self):
+        # dirty way to convert to serializable for DB
+        return json.loads(json.dumps(self))
+
+
+@dataclass
+class ComputedMetricsSummary:
+    initial_value: float
+    min_same_cert_name: str
+    min_same_cert_value: float
+    min_diff_cert_name: str
+    min_diff_cert_value: float
+    max_same_cert_name: str
+    max_same_cert_value: float
+    max_diff_cert_name: str
+    max_diff_cert_value: float
+
+    def to_dict(self):
+        # dirty way to convert to serializable for DB
+        return json.loads(json.dumps(self))
+
+
+@dataclass
+class ComputedMetricsHolder:
+    metrics_summary: dict[str, ComputedMetricsSummary]
+    domain_details: dict[str, ComputedMetrics]
 
     def to_dict(self):
         # dirty way to convert to serializable for DB
@@ -62,8 +99,6 @@ class ComputedLevenshtein:
 
 class Response:
     def __init__(self, zgrabHttpOutput):
-        self.levenshtein_distances: dict[str, ComputedLevenshtein] = None
-
         self._zgrabHttpOutput = zgrabHttpOutput
         self._ip = zgrabHttpOutput["ip"]
         if zgrabHttpOutput["data"]["http"].get("error", False):
@@ -156,64 +191,6 @@ class ResumptionClassification:
     @staticmethod
     def assert_true(truthy, a, b, reason):
         return ResumptionClassification(bool(truthy), reason, a, b)
-
-    def to_dict(self):
-        # dirty way to convert to serializable for DB
-        return json.loads(json.dumps(self))
-
-
-@dataclass
-class LevenshteinResumptionClassification:
-    classification: ResumptionClassificationType
-    reason: str
-    initial_similarity: float
-    closest_same_cert_name: str
-    closest_same_cert_similarity: float
-    closest_diff_cert_name: str
-    closest_diff_cert_similarity: float
-    distances: dict[str, ComputedLevenshtein]
-
-    def __init__(self, similarities: dict[str, ComputedLevenshtein]):
-        assert "initial" in similarities
-        self.distances = similarities
-        self.initial_similarity = similarities["initial"].similarity
-        self.closest_same_cert_name = None
-        self.closest_same_cert_similarity = 0
-        self.closest_diff_cert_name = None
-        self.closest_diff_cert_similarity = 0
-        closest = similarities["initial"]
-        closest_is_initial = True
-        for key, value in similarities.items():
-            if key == "initial":
-                continue
-            if closest.similarity < value.similarity:
-                closest = value
-                closest_is_initial = False
-
-            if value.same_cert:
-                if value.similarity > self.closest_same_cert_similarity:
-                    self.closest_same_cert_name = key
-                    self.closest_same_cert_similarity = value.similarity
-            else:
-                if value.similarity > self.closest_diff_cert_similarity:
-                    self.closest_diff_cert_name = key
-                    self.closest_diff_cert_similarity = value.similarity
-
-        if closest.similarity > 0.5:
-            self.classification = ResumptionClassificationType.from_bool_is_safe(closest.same_cert)
-            if closest_is_initial:
-                assert self.classification == ResumptionClassificationType.SAFE
-                self.reason = "levenshtein: matched initial"
-            else:
-                if closest.same_cert:
-                    assert self.classification == ResumptionClassificationType.SAFE
-                    self.reason = "levenshtein: neighbor with same cert"
-                else:
-                    assert self.classification == ResumptionClassificationType.UNSAFE
-                    self.reason = "levenshtein: strongly matching neighbor with different cert"
-        else:
-            self.classification = ResumptionClassificationType.NOT_APPLICABLE
-            self.reason = "levenshtein: no good match"
 
     def to_dict(self):
         # dirty way to convert to serializable for DB
@@ -341,117 +318,84 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
     if initial.body_sha256 is not None and initial.body_sha256 == resumption.body_sha256:
         # same content
         return ResumptionClassification.safe("body sha256")
+    return ResumptionClassification.not_applicable("No easy way out -> metrics")
 
-    # if initial.content_title is not None and resumption.content_title is not None:
-    #     # same title -> probably same content
-    #     # TODO: maybe remove this?
-    #     return ResumptionClassification.assert_equal(initial.content_title, resumption.content_title, "title")
 
-    _LEVENSHTEIN_THRESHOLD = 0.5
+def summarize_metrics(domain_ratios: dict[str, ComputedMetrics]) -> dict[str, ComputedMetricsSummary]:
+    # compute summary; for each metric find min/max for same/diff cert
+    summary = {}
+    ratio_names = [x[0] for x in ComputedMetrics.__dataclass_fields__.items() if x[1].type == float]
+    for ratio_name in ratio_names:
+        initial_value = None
+        if "initial" in domain_ratios:
+            initial_value = getattr(domain_ratios["initial"], ratio_name)
+        # ugly code, but it works :shrug:
+        min_same_cert_name = None
+        min_same_cert_value = None
+        min_diff_cert_name = None
+        min_diff_cert_value = None
+        max_same_cert_name = None
+        max_same_cert_value = None
+        max_diff_cert_name = None
+        max_diff_cert_value = None
+        for k, v in domain_ratios.items():
+            if k == "initial":
+                continue
+            ratio = getattr(v, ratio_name)
+            if v.same_cert:
+                if not min_same_cert_name or ratio < min_same_cert_value:
+                    min_same_cert_name = k
+                    min_same_cert_value = ratio
+                if not max_same_cert_name or ratio > max_same_cert_value:
+                    max_same_cert_name = k
+                    max_same_cert_value = ratio
+            else:
+                if not min_diff_cert_name or ratio < min_diff_cert_value:
+                    min_diff_cert_name = k
+                    min_diff_cert_value = ratio
+                if not max_diff_cert_name or ratio > max_diff_cert_value:
+                    max_diff_cert_name = k
+                    max_diff_cert_value = ratio
+        summary[ratio_name] = ComputedMetricsSummary(
+            initial_value=initial_value,
+            min_same_cert_name=min_same_cert_name,
+            min_same_cert_value=min_same_cert_value,
+            min_diff_cert_name=min_diff_cert_name,
+            min_diff_cert_value=min_diff_cert_value,
+            max_same_cert_name=max_same_cert_name,
+            max_same_cert_value=max_same_cert_value,
+            max_diff_cert_name=max_diff_cert_name,
+            max_diff_cert_value=max_diff_cert_value,
+        )
+    return summary
 
-    # compare initial and resumption body by levenshtein
-    max_r = levenstein_ratio(initial.body, resumption.body)
-    closest_body, closest_cert = initial.body, initial.certificate
-    max_r_is_initial = True
 
-    ratios = {"initial": ComputedLevenshtein(True, levenstein_ratio(initial.body, resumption.body))}
+def compute_metrics(initial: Response, resumption: Response, domain_from: str, initial_doc_id):
+    if not resumption.body:
+        return None
+    if not resumption.resumed:
+        return None
 
-    # check all neighbors for levenshtein match - give us the thing we are most likely on
-    # neighbor_domains = get_domain_neighborhood(domain_from)
-    # TODO: store all computed ratios - then store the ratios of the closest match with the same cert and the closest match with a different cert
-    relevant_domains = set(get_domains_on_ip(resumption._ip) + extract_subjects(initial.parsed_certificate))
+    domain_ratios = {"initial": ComputedMetrics.from_response(True, resumption.body, initial.body)}
+    relevant_domains = set(
+        get_domains_on_ip(resumption._ip)
+        + extract_subjects(initial.parsed_certificate)
+        + get_domain_neighborhood(domain_from)
+    )
     for neighbor_domain in relevant_domains:
-        for neighbor_body, neighbor_cert, neigbor_id in get_body_cert_id_for_domain(neighbor_domain):
-            key = f"{neighbor_domain}[{neigbor_id}]"
-            assert key not in ratios
-            ratios[key] = ComputedLevenshtein.from_response(
+        for neighbor_body, neighbor_cert, neighbor_id in get_body_cert_id_for_domain(neighbor_domain):
+            if neighbor_id == initial_doc_id:
+                # we already computed 'initial' separately
+                continue
+            if not neighbor_body:
+                continue
+            key = f"{neighbor_domain}[{neighbor_id}]"
+            assert key not in domain_ratios
+            domain_ratios[key] = ComputedMetrics.from_response(
                 initial.certificate == neighbor_cert, resumption.body, neighbor_body
             )
 
-    return LevenshteinResumptionClassification(ratios)
-
-    # we actually consider this sufficiently close
-    if max_r > _LEVENSHTEIN_THRESHOLD:
-        assert type(closest_cert) == str
-        assert type(initial.certificate) == str
-        if max_r_is_initial:
-            return ResumptionClassification.safe("levenshtein: matched initial")
-
-        if closest_cert != initial.certificate:
-            return ResumptionClassification.unsafe("levenshtein: strongly matching neighbor with different cert")
-        else:
-            return ResumptionClassification.safe("levenshtein: neighbor with same cert")
-
-    # if initial.body and resumption.body:
-    #     if Levenshtein.ratio(initial.body, resumption.body) > _LEVENSHTEIN_THRESHOLD:
-    #         return ResumptionClassification.safe("body by levenshtein")
-    #     else:
-    #         return ResumptionClassification.unsafe("body by levenshtein")
-    # only one of initial/resumption has a title - does the status code change?
-    # if initial.content_title is not None and resumption.content_title is None:
-    #     return ResumptionClassification.assert_equal(
-    #         initial.status_code,
-    #         resumption.status_code,
-    #         "compare statuscode when redirected from content to title-less with different statuscode",
-    #     )
-    # if initial.content_title is None and resumption.content_title is not None:
-    #     return ResumptionClassification.assert_equal(
-    #         initial.status_code,
-    #         resumption.status_code,
-    #         "compare statuscode when redirected from title-less to content with different statuscode",
-    #     )
-
-    # WE DO NOT HAVE ANY CONTENT TITLE TO GO OFF OF
-
-    # status code changed from okayish to error or the other way around -> thats clearly suspicious
-    # if initial.status_code in range(200, 300) and resumption.status_code in range(
-    #     400, 500
-    # ):
-    #     return ResumptionClassification.unsafe(
-    #         "no titles, but from success to error on resumption"
-    #     )
-    # if initial.status_code in range(400, 500) and resumption.status_code in range(
-    #     200, 300
-    # ):
-    #     return ResumptionClassification.unsafe(
-    #         "no contetitles, but from error to success on resumption"
-    #     )
-
-    # if initial.status_code in range(400, 500):
-    #     return ResumptionClassification.not_applicable(
-    #         "Initial was error, title and body failed us"
-    #     )
-
-    # if (
-    #     initial.content_length
-    #     and resumption.content_length
-    #     and initial.content_length != resumption.content_length
-    # ):
-    #     return ResumptionClassification.unsafe("no titles, but unequal length contents")
-
-    # if initial.status_code != resumption.status_code:
-    #     # there really was literally nothing besides status code - did it change?
-    #     if initial.body_sha256 is None and resumption.body_sha256 is None:
-    #         return ResumptionClassification.not_applicable(
-    #             "different status code when completely empty",
-    #             initial.status_code,
-    #             resumption.status_code,
-    #         )
-
-    # else:
-    #     # nothing really changed, the content is not really telling, but it was an same length error -> pretty likely an error message
-    #     assert initial.status_code == resumption.status_code
-    #     if (
-    #         initial.status_code in range(400, 500)
-    #         and initial.content_length == resumption.content_length
-    #     ):
-    #         # no real (title) content, but both error, same length is pretty safe
-    #         return ResumptionClassification.safe(
-    #             "untitled but same format error message"
-    #         )
-
-    # TODO decide here...
-    return ResumptionClassification.unsafe("unsure")
+    return ComputedMetricsHolder(metrics_summary=summarize_metrics(domain_ratios), domain_details=domain_ratios)
 
 
 def get_domains_on_ip(ip):
@@ -511,72 +455,62 @@ def get_body_cert_for_ids(ids: list):
             yield id.binary.hex(), (body, cert)
 
 
-def analyze_item_iter(result: AnalyzedZgrab2ResumptionResult):
+def analyze_item_iter(result: AnalyzedZgrab2ResumptionResult, initial_doc_id):
     for redirected in result.redirect:
         # redirected: Response = redirected
         try:
-            yield classify_resumption(result.initial, redirected, result.domain_from)
+            yield classify_resumption(result.initial, redirected, result.domain_from), compute_metrics(
+                result.initial, redirected, result.domain_from, initial_doc_id
+            )
         except Exception as e:
             logging.exception(
                 f"Error in classify_resumption ({result.domain_from}, {result.initial._ip} -> {redirected._ip}): {e}"
             )
-            yield ResumptionClassification.not_applicable("exception occured")
+            yield ResumptionClassification.not_applicable("exception occured"), None
 
 
 def analyze_item(doc, insert_result: bool = True):
-    doc_id = doc["_id"]
+    doc_id: ObjectId = doc["_id"]
     del doc["_id"]
     result = AnalyzedZgrab2ResumptionResult(**doc)
-    resumption_classifications = list(analyze_item_iter(result))
+    resumption_classifications_and_metrics = list(analyze_item_iter(result, doc_id))
 
-    # compute levenshtein similarities for initial connection, may be useful to ultimately classify resumptions
+    # also compute similarities for initial connection, may be useful to ultimately classify resumptions
+    # thus far only the similarities of the resumption and other domains (X) has been computed
+    # we now compare the initial connection to all X and store the results
     id_to_domain = {}
     ids = set()
-    for classification in resumption_classifications:
-        if isinstance(classification, LevenshteinResumptionClassification):
-            for key in classification.distances:
+    for classification, metrcis_holder in resumption_classifications_and_metrics:
+        if metrcis_holder is not None:
+            for key in metrcis_holder.domain_details:
                 if "[" in key:
                     domain, body_id = key.split("[", 1)
                     body_id = body_id.rstrip("]")
                     ids.add(body_id)
                     id_to_domain[body_id] = domain
+
     body_certs = dict(get_body_cert_for_ids(ids))
 
-    similarities = {}
-    farthest_same_cert_name = None
-    farthest_same_cert_similarity = None
-    closest_diff_cert_name = None
-    closest_diff_cert_similarity = None
+    initial_metrics = {}
     for id in ids:
         domain = id_to_domain[id]
         body, cert = body_certs[id]
         key = f"{domain}[{id}]"
-        current_levenshtein = ComputedLevenshtein.from_response(
+        initial_metrics[key] = ComputedMetrics.from_response(
             result.initial.certificate == cert, result.initial.body, body
         )
-        similarities[key] = current_levenshtein.to_dict()
-        if current_levenshtein.same_cert:
-            if not farthest_same_cert_similarity or current_levenshtein.similarity < farthest_same_cert_similarity:
-                farthest_same_cert_name = key
-                farthest_same_cert_similarity = current_levenshtein.similarity
-        else:
-            if not closest_diff_cert_similarity or current_levenshtein.similarity > closest_diff_cert_similarity:
-                closest_diff_cert_name = key
-                closest_diff_cert_similarity = current_levenshtein.similarity
+    initial_metrics_holder = ComputedMetricsHolder(
+        metrics_summary=summarize_metrics(initial_metrics), domain_details=initial_metrics
+    )
 
-    if similarities:
-        similarities["farthest_same_cert_name"] = farthest_same_cert_name
-        similarities["farthest_same_cert_similarity"] = farthest_same_cert_similarity
-        similarities["closest_diff_cert_name"] = closest_diff_cert_name
-        similarities["closest_diff_cert_similarity"] = closest_diff_cert_similarity
-
-    update = {"$set": {"initial._similarities": similarities}}
-    for i, classification in enumerate(resumption_classifications):
+    update = {"$set": {"initial._metrics": initial_metrics_holder.to_dict()}}
+    for i, (classification, metrics) in enumerate(resumption_classifications_and_metrics):
         update["$set"][f"redirect.{i}._classification"] = classification.to_dict()
+        update["$set"][f"redirect.{i}._metrics"] = metrics.to_dict()
     if insert_result:
         ScanContext.mongo_collection.update_one({"_id": doc_id}, update, upsert=False)
 
-    return result, resumption_classifications
+    return result, resumption_classifications_and_metrics
 
 
 def limit(iterable, limit):
@@ -619,7 +553,7 @@ def analyze_collection(collection_filter=...):
     logging.info("Starting")
     with ProcessPool() as pool:
         # with ThreadPool(1) as pool:
-        for result, classifications in pool.imap_unordered(analyze_item, db_items):
+        for result, classifications_and_metrics in pool.imap_unordered(analyze_item, db_items):
             _NUM += 1
             if _NUM % 1000 == 0 or time.time() - _LAST_PRINT > 60:
                 _LAST_PRINT = time.time()
@@ -631,20 +565,11 @@ def analyze_collection(collection_filter=...):
                 )
                 sys.stdout.flush()
 
-            for i, classification in enumerate(classifications):
+            for i, (classification, metrics) in enumerate(classifications_and_metrics):
                 redirected = result.redirect[i]
 
                 result_type = results.get(classification.classification)
                 reason = classification.reason
-                if isinstance(classification, LevenshteinResumptionClassification):
-                    reason_suffix = " | ".join(
-                        (
-                            f"closest_same {classification.closest_same_cert_similarity:.1f}",
-                            f"closest_diff {classification.closest_diff_cert_similarity:.1f}",
-                            f"initial {classification.initial_similarity:.1f}",
-                        )
-                    )
-                    reason += f" [{reason_suffix}]"
                 if reason not in result_type:
                     result_type[reason] = 0
                 result_type[reason] += 1
@@ -660,24 +585,19 @@ def main(collection_name=None, collection_filter=...):
 def test():
     from tqdm import tqdm
 
-    ScanContext.initialize("ticket_redirection_2024-06-12 19:41:10.680922")
+    ScanContext.initialize()
     collection_filter = {
-        "redirect": {
-            "$elemMatch": {
-                # "_classification.classification": "NOT_APPLICABLE",
-                # "_classification.reason": "exception occured",
-                "_classification.classification": "UNSAFE",
-                "_classification.reason": "location",
-            }
-        }
+        "redirect.data.http.result.response.status_code": 200,
+        "domain_from": "www.usastreams.com",
     }
-    db_items = ScanContext.mongo_collection.find(collection_filter)
-    _COUNT = ScanContext.mongo_collection.count_documents(collection_filter)
+    limit = 100
+    db_items = ScanContext.mongo_collection.find(collection_filter, limit=limit)
+    _COUNT = ScanContext.mongo_collection.count_documents(collection_filter, limit=limit)
 
     results = {typ: dict() for typ in ResumptionClassificationType}
     for item in tqdm(db_items, total=_COUNT):
-        _, classifications = analyze_item(item, insert_result=False)
-        for classification in classifications:
+        _, classifications_and_metrics = analyze_item(item, insert_result=False)
+        for classification, metrics in classifications_and_metrics:
             result_type = results.get(classification.classification)
             reason = classification.reason
             if reason not in result_type:
@@ -693,4 +613,5 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)-7s | %(process)d %(processName)s - %(name)s.%(funcName)s: %(message)s",
     )
     logging.getLogger("neo4j").setLevel(logging.WARNING)
-    main()
+    # main()
+    test()
