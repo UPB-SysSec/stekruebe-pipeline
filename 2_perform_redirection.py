@@ -313,7 +313,7 @@ class Zgrab2Scanner(Scanner):
         For documentation, see zgrab2 -h.
         """
         cmd = [
-            "./zgrab2",
+            "zgrab2_tls13",
         ]
 
         if probe not in ["http", "tls"]:
@@ -578,7 +578,7 @@ def get_domains(cluster: int = None, limit: int = None):
             query += f" LIMIT $limit"
         query = session.run(query, cluster=cluster, limit=limit)
         for record in query:
-            yield Domain(record.get("domain"))
+            yield record.get("domain")
 
 
 def print_dummy_query():
@@ -589,8 +589,11 @@ def print_dummy_query():
         .replace("$ip", '"172.217.128.200"')
     )
 
+def evaluate_domain(domain: str):
+    assert isinstance(domain, str)
+    return Domain(domain).evaluate()
 
-def main(parallelize, *, create_indexes=True, profile=False, dummy_scanner=False, explicit_collection=None):
+def main(parallelize, *, create_indexes=True, profile=False, dummy_scanner=False, explicit_collection=None, CLUSTER=None, LIMIT=None):
 
     ScanContext.initialize(
         mongo_collection_name=explicit_collection,
@@ -602,12 +605,6 @@ def main(parallelize, *, create_indexes=True, profile=False, dummy_scanner=False
     # print_dummy_query()
 
     # getting all domains takes a bit, but still reasonable | about 47 seconds for 620,076 domains
-
-    CLUSTER = None
-    LIMIT = None
-    # MATCH (n:DOMAIN) RETURN n.clusterID, count(n.clusterID) as c ORDER BY c DESC
-    # CLUSTER = 393  # Test Cluster (2094 domains)
-    LIMIT = 1000  # Test Limit
 
     if (
         CLUSTER is not None
@@ -635,10 +632,10 @@ def main(parallelize, *, create_indexes=True, profile=False, dummy_scanner=False
         if isinstance(parallelize, (int, type(None))):
             num_threads = parallelize
         with ProcessPool(processes=num_threads) as pool:
-            pool.map(Domain.evaluate, DOMAINS)
+            pool.map(evaluate_domain, DOMAINS)
     else:
         for domain in DOMAINS:
-            domain.evaluate()
+            evaluate_domain(domain)
 
     print("DONE")
     print(STATS)
@@ -716,14 +713,18 @@ def test_with_zgrab(domain: str):
 if __name__ == "__main__":
     # test("latam.com")
     # test_with_zgrab("latam.com")
-    # main(64) # PROD
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s | %(process)d %(processName)s - %(name)s.%(funcName)s: %(message)s",
     )
-    logging.getLogger("neo4j").setLevel(logging.WARNING)
-    main(
-        60,
-        dummy_scanner=False,
-        explicit_collection="test",
-    )  # DEV
+    logging.getLogger("neo4j").setLevel(logging.CRITICAL)
+    # from utils import debug
+    # debug.MemoryMonitor(key_type="traceback", limit=10, trace_depth=10).start()
+    # main(64*3, explicit_collection="test")
+    main(64*3) # PROD
+    # To find a test cluster MATCH (n:DOMAIN) RETURN n.clusterID, count(n.clusterID) as c ORDER BY c DESC
+    # main(
+    #     60,
+    #     dummy_scanner=False,
+    #     explicit_collection="test",
+    # )  # DEV
