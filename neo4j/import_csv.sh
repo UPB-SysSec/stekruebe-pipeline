@@ -1,9 +1,12 @@
+#!/bin/sh -e
+cd "$(dirname "$0")"
+
 docker run \
 	-it \
 	--rm \
 	--name steckruebe-import \
-	-v /data/cdn_ticket/neo4j/neo4jdata:/data \
-	-v /data/cdn_ticket/neo4j/import:/import \
+	-v "$(pwd)"/neo4jdata:/data \
+	-v "$(pwd)"/import:/import \
 	neo4j:5.13.0 \
 neo4j-admin database import full \
 	--nodes /import/domains_header.csv,/import/domains.csv \
