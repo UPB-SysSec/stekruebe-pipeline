@@ -1,5 +1,5 @@
 import logging
-from pprint import pprint
+from pprint import pprint, pformat
 from neo4j import GraphDatabase
 from bson import ObjectId
 from enum import Enum
@@ -380,7 +380,7 @@ def compute_metrics(initial: Response, resumption: Response, domain_from: str, i
     relevant_domains = set(
         get_domains_on_ip(resumption._ip)
         + extract_subjects(initial.parsed_certificate)
-        + get_domain_neighborhood(domain_from)
+        # + get_domain_neighborhood(domain_from)
     )
     for neighbor_domain in relevant_domains:
         for neighbor_body, neighbor_cert, neighbor_id in get_body_cert_id_for_domain(neighbor_domain):
@@ -469,15 +469,7 @@ def analyze_item_iter(result: AnalyzedZgrab2ResumptionResult, initial_doc_id):
             yield ResumptionClassification.not_applicable("exception occured"), None
 
 
-def analyze_item(doc, insert_result: bool = True):
-    doc_id: ObjectId = doc["_id"]
-    del doc["_id"]
-    result = AnalyzedZgrab2ResumptionResult(**doc)
-    resumption_classifications_and_metrics = list(analyze_item_iter(result, doc_id))
-
-    # also compute similarities for initial connection, may be useful to ultimately classify resumptions
-    # thus far only the similarities of the resumption and other domains (X) has been computed
-    # we now compare the initial connection to all X and store the results
+def compute_initial_metrics(result: AnalyzedZgrab2ResumptionResult, resumption_classifications_and_metrics):
     id_to_domain = {}
     ids = set()
     for classification, metrcis_holder in resumption_classifications_and_metrics:
@@ -499,16 +491,34 @@ def analyze_item(doc, insert_result: bool = True):
         initial_metrics[key] = ComputedMetrics.from_response(
             result.initial.certificate == cert, result.initial.body, body
         )
-    initial_metrics_holder = ComputedMetricsHolder(
-        metrics_summary=summarize_metrics(initial_metrics), domain_details=initial_metrics
-    )
+    if not initial_metrics:
+        return None
+    return ComputedMetricsHolder(metrics_summary=summarize_metrics(initial_metrics), domain_details=initial_metrics)
 
-    update = {"$set": {"initial._metrics": initial_metrics_holder.to_dict()}}
-    for i, (classification, metrics) in enumerate(resumption_classifications_and_metrics):
-        update["$set"][f"redirect.{i}._classification"] = classification.to_dict()
-        update["$set"][f"redirect.{i}._metrics"] = metrics.to_dict()
-    if insert_result:
-        ScanContext.mongo_collection.update_one({"_id": doc_id}, update, upsert=False)
+
+def analyze_item(doc, insert_result: bool = True):
+    doc_id: ObjectId = doc["_id"]
+    del doc["_id"]
+    result = AnalyzedZgrab2ResumptionResult(**doc)
+    resumption_classifications_and_metrics = list(analyze_item_iter(result, doc_id))
+
+    # also compute similarities for initial connection, may be useful to ultimately classify resumptions
+    # thus far only the similarities of the resumption and other domains (X) has been computed
+    # we now compare the initial connection to all X and store the results
+    if resumption_classifications_and_metrics:
+        initial_metrics = compute_initial_metrics(result, resumption_classifications_and_metrics)
+
+        update_set = {}
+        if initial_metrics is not None:
+            {"initial._metrics": initial_metrics.to_dict()}
+        for i, (classification, metrics) in enumerate(resumption_classifications_and_metrics):
+            update_set[f"redirect.{i}._classification"] = classification.to_dict()
+            if metrics is not None:
+                update_set[f"redirect.{i}._metrics"] = metrics.to_dict()
+        if insert_result:
+            ScanContext.mongo_collection.update_one({"_id": doc_id}, {"$set": update_set}, upsert=False)
+        else:
+            logging.info(f"Would update {doc_id} ({result.domain_from}) with \n{pformat(update_set)}")
 
     return result, resumption_classifications_and_metrics
 
@@ -540,7 +550,7 @@ def cleanup_db():
 def analyze_collection(collection_filter=...):
     if collection_filter is ...:
         collection_filter = {"status": "SUCCESS"}
-    ScanContext.mongo_collection.create_index("initial._similarities", sparse=True)
+    ScanContext.mongo_collection.create_index("initial._metrics", sparse=True)
     results = {typ: dict() for typ in ResumptionClassificationType}
     db_items = ScanContext.mongo_collection.find(collection_filter)
     _COUNT = ScanContext.mongo_collection.count_documents(collection_filter)
@@ -566,8 +576,6 @@ def analyze_collection(collection_filter=...):
                 sys.stdout.flush()
 
             for i, (classification, metrics) in enumerate(classifications_and_metrics):
-                redirected = result.redirect[i]
-
                 result_type = results.get(classification.classification)
                 reason = classification.reason
                 if reason not in result_type:
@@ -586,17 +594,17 @@ def test():
     from tqdm import tqdm
 
     ScanContext.initialize()
-    collection_filter = {
-        "redirect.data.http.result.response.status_code": 200,
-        "domain_from": "www.usastreams.com",
-    }
-    limit = 100
-    db_items = ScanContext.mongo_collection.find(collection_filter, limit=limit)
-    _COUNT = ScanContext.mongo_collection.count_documents(collection_filter, limit=limit)
+    collection_filter = {"redirect.data.http.result.response.status_code": 200}
+    query_limit = 1000
+    db_items = ScanContext.mongo_collection.find(collection_filter, limit=query_limit)
+    _COUNT = ScanContext.mongo_collection.count_documents(collection_filter, limit=query_limit)
 
     results = {typ: dict() for typ in ResumptionClassificationType}
     for item in tqdm(db_items, total=_COUNT):
+        item_name = f"{item['_id']}, {item['domain_from']}"
         _, classifications_and_metrics = analyze_item(item, insert_result=False)
+        if not classifications_and_metrics:
+            print(f"No classifications {item_name}")
         for classification, metrics in classifications_and_metrics:
             result_type = results.get(classification.classification)
             reason = classification.reason
