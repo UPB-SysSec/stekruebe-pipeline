@@ -46,9 +46,38 @@ def levenshtein_ratio(a, b):
     return Levenshtein.ratio(a, b)
 
 
+# TODO modify constants to obtain better results
+def compare_entry(entry1, entry2):
+    if entry1.name == "script":
+        if entry1["nonce"] is not None: entry1["nonce"] = "rand"
+        if entry2["nonce"] is not None: entry2["nonce"] = "rand"
+        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.9: return True
+    if entry1.name == "title":
+        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.75: return True
+
+    # TODO Add other cases if found
+
+    return False
+
+
 def levenstein_header_ratio(a, b):
-    # FIXME @mradoy
-    return levenshtein_ratio(a[:100], b[:100])
+    soup1 = BeautifulSoup(txt1, 'html.parser')
+    soup2 = BeautifulSoup(txt2, 'html.parser')
+    head1 = soup1.head
+    head2 = soup2.head
+    penalty = 0
+    penalty += 0.5 * (abs(len(list(head1.children)) - len(list(head2.children))))
+    for (x, y) in zip(head1.children, head2.children):
+        if not x == y:
+            # Penalty for mismatch (deducted when found in the next step)
+            penalty += 1.1
+            for r in head2.find_all(x.name):
+                if compareEntry(x, r):
+                    # We found a similar enough entry so let's deduct the penalty partly (position was still wrong)
+                    penalty -= 0.9
+                    break
+
+    return max(0, min(1, 1 - (penalty / len(list(soup1.head.children)))))
 
 
 @dataclass
