@@ -67,7 +67,7 @@ def compare_entry(entry1, entry2):
     return False
 
 
-def levenstein_header_ratio(a, b):
+def radoy_header_ratio(a, b):
     soup1 = BeautifulSoup(a, 'html.parser')
     soup2 = BeautifulSoup(b, 'html.parser')
     head1 = soup1.head
@@ -93,18 +93,39 @@ def levenstein_header_ratio(a, b):
     return max(0, min(1, 1 - (penalty / len(list(soup1.head.children)))))
 
 
+def extract_head(html: str, tag="head"):
+    # naive way to find head
+    start = html.find(f"<head")
+    end = html.find("</head")
+    if start == -1 and end == -1:
+        # no head in here
+        return ""
+    if end == -1:
+        # end was probably cut off
+        return html[start:]
+    return html[start:end]
+
+
+def levenshtein_header_similarity(a, b):
+    head_a = extract_head(a)
+    head_b = extract_head(b)
+    return levenshtein_ratio(head_a, head_b)
+
+
 @dataclass
 class ComputedMetrics:
     same_cert: bool
-    levensthtein_similarity: float
-    levensthtein_header_similarity: float
+    levenshtein_similarity: float
+    levenshtein_header_similarity: float
+    radoy_header_similarity: float
 
     @staticmethod
     def from_response(same_cert, body_resumption, body_other):
         return ComputedMetrics(
             same_cert=same_cert,
-            levensthtein_similarity=levenshtein_ratio(body_resumption, body_other),
-            levensthtein_header_similarity=levenstein_header_ratio(body_resumption, body_other),
+            levenshtein_similarity=levenshtein_ratio(body_resumption, body_other),
+            levenshtein_header_similarity=levenshtein_header_similarity(body_resumption, body_other),
+            radoy_header_similarity=radoy_header_ratio(body_resumption, body_other),
         )
 
     def to_dict(self):
