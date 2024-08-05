@@ -53,6 +53,7 @@ def levenshtein_ratio(a, b):
 
 # TODO modify constants to obtain better results
 def compare_entry(entry1, entry2):
+    if entry1 is None or entry2 is None: return False
     if entry1.name == "script" and entry2.name == "script":
         if entry1.has_attr("nonce"): entry1["nonce"] = "rand"
         if entry2.has_attr("nonce"): entry2["nonce"] = "rand"
@@ -91,13 +92,12 @@ def radoy_header_ratio(a, b):
     penalty = 0
     penalty += 0.5*(abs(len(list(head1.children)) - len(list(head2.children)))**1.4)
 
-    if len(head1.children)<len(head2.children): head1,head2=head2,head1
     for (x, y) in itertools.zip_longest(head1.children, head2.children):
         if x != y and not compare_entry(x, y):
             # Penalty for mismatch (deducted when found in the next step)
-            penalty += 1.1
-            for r in head2.find_all(x.name):
-                if compare_entry(x, r):
+            penalty += 1.2
+            for r in head2.find_all(x.name if x is not None else y.name):
+                if compare_entry(x if x is not None else y, r):
                     # We found a similar enough entry so let's deduct the penalty partly (position was still wrong)
                     penalty -= 0.9
                     break
