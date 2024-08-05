@@ -2,3 +2,4 @@ tqdm
 neo4j
 pymongo
 Levenshtein
+beautifulsoup4

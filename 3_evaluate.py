@@ -19,6 +19,7 @@ import utils.json_serialization as json
 from utils.db import MongoDB, MongoCollection, Neo4j, connect_mongo, connect_neo4j, get_most_recent_collection_name
 from pymongo.collection import Collection
 from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 
 
 class ScanContext:
@@ -61,10 +62,16 @@ def compare_entry(entry1, entry2):
 
 
 def levenstein_header_ratio(a, b):
-    soup1 = BeautifulSoup(txt1, 'html.parser')
-    soup2 = BeautifulSoup(txt2, 'html.parser')
+    soup1 = BeautifulSoup(a, 'html.parser')
+    soup2 = BeautifulSoup(b, 'html.parser')
     head1 = soup1.head
     head2 = soup2.head
+    if head1 is None and head2 is not None or head1 is not None and head2 is None:
+        return 0
+    if head1 is None and head2 is None:
+        # This is kind of a similarity but does it make sense?
+        return 1
+
     penalty = 0
     penalty += 0.5 * (abs(len(list(head1.children)) - len(list(head2.children))))
     for (x, y) in zip(head1.children, head2.children):
@@ -72,7 +79,7 @@ def levenstein_header_ratio(a, b):
             # Penalty for mismatch (deducted when found in the next step)
             penalty += 1.1
             for r in head2.find_all(x.name):
-                if compareEntry(x, r):
+                if compare_entry(x, r):
                     # We found a similar enough entry so let's deduct the penalty partly (position was still wrong)
                     penalty -= 0.9
                     break
