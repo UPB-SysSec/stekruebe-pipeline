@@ -59,8 +59,8 @@ def compare_entry(entry1, entry2):
         if entry1.has_attr("content") and entry2.has_attr("content"):
             return True
     if entry1.name == "meta" and entry2.name == "meta":
-        if (entry1.has_property("og_title") and entry2.has_property("og_title")
-                and entry1.has_property("content") and entry2.has_property("content")):
+        if (entry1.has_attr("og_title") and entry2.has_attr("og_title")
+                and entry1.has_attr("content") and entry2.has_attr("content")):
             if Levenshtein.ratio(str(entry1["content"]), str(entry2["content"])) > 0.5: return True
     # TODO Add other cases if found
 
