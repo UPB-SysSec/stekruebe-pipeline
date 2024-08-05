@@ -1,3 +1,4 @@
+import itertools
 import logging
 from pprint import pprint, pformat
 from neo4j import GraphDatabase
@@ -55,7 +56,6 @@ def compare_entry(entry1, entry2):
     if entry1.name == "script" and entry2.name == "script":
         if entry1.has_attr("nonce"): entry1["nonce"] = "rand"
         if entry2.has_attr("nonce"): entry2["nonce"] = "rand"
-        #todo compare sources for scripts without body
         if entry1.has_attr("src") and entry2.has_attr("src"):
             src1 = entry1["src"].split("?")[0]
             src2 = entry2["src"].split("?")[0]
@@ -90,7 +90,9 @@ def radoy_header_ratio(a, b):
 
     penalty = 0
     penalty += 0.5*(abs(len(list(head1.children)) - len(list(head2.children)))**1.4)
-    for (x, y) in zip(head1.children, head2.children):
+
+    if len(head1.children)<len(head2.children): head1,head2=head2,head1
+    for (x, y) in itertools.zip_longest(head1.children, head2.children):
         if x != y and not compare_entry(x, y):
             # Penalty for mismatch (deducted when found in the next step)
             penalty += 1.1
