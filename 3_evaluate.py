@@ -54,10 +54,14 @@ def compare_entry(entry1, entry2):
         if entry2.has_attr("nonce"): entry2["nonce"] = "rand"
         if Levenshtein.ratio(str(entry1), str(entry2)) > 0.75: return True
     if entry1.name == "title":
-        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.75: return True
+        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.5: return True
     if entry1.name == "meta" and entry2.name == "meta":
         if entry1.has_attr("content") and entry2.has_attr("content"):
             return True
+    if entry1.name == "meta" and entry2.name == "meta":
+        if (entry1.has_property("og_title") and entry2.has_property("og_title")
+                and entry1.has_property("content") and entry2.has_property("content")):
+            if Levenshtein.ratio(str(entry1["content"]), str(entry2["content"])) > 0.5: return True
     # TODO Add other cases if found
 
     return False
@@ -192,11 +196,11 @@ class ResumptionClassification:
     value_redirect: Optional[str]
 
     def __init__(
-        self,
-        is_safe: Union[ResumptionClassificationType, bool],
-        reason: str,
-        reason_initial: Optional[str] = None,
-        reason_redirect: Optional[str] = None,
+            self,
+            is_safe: Union[ResumptionClassificationType, bool],
+            reason: str,
+            reason_initial: Optional[str] = None,
+            reason_redirect: Optional[str] = None,
     ):
         if isinstance(is_safe, bool):
             self.classification = ResumptionClassificationType.from_bool_is_safe(is_safe)
@@ -609,7 +613,7 @@ def analyze_collection(collection_filter=...):
                 pprint(results, stream=sys.stderr)
                 sys.stderr.flush()
                 print(
-                    f"Processed {_NUM:}/{_COUNT} ({_NUM/_COUNT:6.2%}) in {time.time()-_START:.2f}s | {_NUM/(time.time()-_START):.2f} items/s | ETA {ETA}",
+                    f"Processed {_NUM:}/{_COUNT} ({_NUM / _COUNT:6.2%}) in {time.time() - _START:.2f}s | {_NUM / (time.time() - _START):.2f} items/s | ETA {ETA}",
                 )
                 sys.stdout.flush()
 
