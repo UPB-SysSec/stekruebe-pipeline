@@ -56,15 +56,17 @@ def compare_entry(entry1, entry2):
         if entry1.has_attr("nonce"): entry1["nonce"] = "rand"
         if entry2.has_attr("nonce"): entry2["nonce"] = "rand"
         if Levenshtein.ratio(str(entry1), str(entry2)) > 0.75: return True
-    if entry1.name == "title":
-        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.5: return True
+    if entry1.name == "title" and entry2.name == "title":
+        # We can't match titles, but we hope that both have a title tag
+        return True
     if entry1.name == "meta" and entry2.name == "meta":
         if entry1.has_attr("content") and entry2.has_attr("content"):
             return True
     if entry1.name == "meta" and entry2.name == "meta":
         if (entry1.has_attr("og_title") and entry2.has_attr("og_title")
                 and entry1.has_attr("content") and entry2.has_attr("content")):
-            if Levenshtein.ratio(str(entry1["content"]), str(entry2["content"])) > 0.5: return True
+            # We can't match titles, but if both meta tags are there we say they match somewhat
+            return True
     # TODO Add other cases if found
 
     return False
@@ -78,13 +80,13 @@ def radoy_header_ratio(a, b):
     if head1 is None and head2 is not None or head1 is not None and head2 is None:
         return 0
     if head1 is None and head2 is None:
-        # This is kind of a similarity but does it make sense?
-        return 1
+        # This is kind of a similar, but we set -1 since our test  is not applicable
+        return -1
 
     penalty = 0
     penalty += 0.5 * (abs(len(list(head1.children)) - len(list(head2.children))))
     for (x, y) in zip(head1.children, head2.children):
-        if not x == y:
+        if x != y and not compare_entry(x, y):
             # Penalty for mismatch (deducted when found in the next step)
             penalty += 1.1
             for r in head2.find_all(x.name):
