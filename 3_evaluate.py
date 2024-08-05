@@ -50,9 +50,9 @@ def levenshtein_ratio(a, b):
 # TODO modify constants to obtain better results
 def compare_entry(entry1, entry2):
     if entry1.name == "script":
-        if entry1["nonce"] is not None: entry1["nonce"] = "rand"
-        if entry2["nonce"] is not None: entry2["nonce"] = "rand"
-        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.9: return True
+        if entry1.has_attr("nonce"): entry1["nonce"] = "rand"
+        if entry2.has_attr("nonce"): entry2["nonce"] = "rand"
+        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.75: return True
     if entry1.name == "title":
         if Levenshtein.ratio(str(entry1), str(entry2)) > 0.75: return True
 

@@ -11,3 +11,4 @@ __pycache__
 99_z2_redirected.html
 trie.pickle
 .venv/
+.idea/
