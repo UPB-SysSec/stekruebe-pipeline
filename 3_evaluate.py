@@ -51,7 +51,8 @@ def levenshtein_ratio(a, b):
     return Levenshtein.ratio(a, b)
 
 
-# TODO modify constants to obtain better results
+# Header can contains title, style, base(?), link, meta, script, noscript
+# For meta, see https://gist.github.com/lancejpollard/1978404
 def compare_entry(entry1, entry2):
     if entry1 is None or entry2 is None: return False
     if entry1.name == "script" and entry2.name == "script":
@@ -60,20 +61,43 @@ def compare_entry(entry1, entry2):
         if entry1.has_attr("src") and entry2.has_attr("src"):
             src1 = entry1["src"].split("?")[0]
             src2 = entry2["src"].split("?")[0]
+            # TODO Should they be completely equal?
             return src1 == src2
         if Levenshtein.ratio(str(entry1), str(entry2)) > 0.75: return True
+
+    if entry1.name == "link" and entry2.name == "link":
+        if entry1.has_attr("nonce"): entry1["nonce"] = "rand"
+        if entry2.has_attr("nonce"): entry2["nonce"] = "rand"
+        if entry1.has_attr("rel") and entry2.has_attr("rel") and entry1["rel"] != entry2["rel"]: return False
+        if entry1.has_attr("size") and entry2.has_attr("size") and entry1["size"] != entry2["size"]: return False
+        if entry1.has_attr("href") and entry2.has_attr("href"):
+            src1 = entry1["href"].split("?")[0]
+            src2 = entry2["href"].split("?")[0]
+            # TODO Should they be completely equal?
+            return src1 == src2
+        return False
+
+    if entry1.name == entry2.name == "style":
+        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.9: return True
+
     if entry1.name == "title" and entry2.name == "title":
         # We can't match titles, but we hope that both have a title tag
         return True
     if entry1.name == "meta" and entry2.name == "meta":
-        if entry1.has_attr("content") and entry2.has_attr("content"):
-            return True
-    if entry1.name == "meta" and entry2.name == "meta":
-        if (entry1.has_attr("og_title") and entry2.has_attr("og_title")
-                and entry1.has_attr("content") and entry2.has_attr("content")):
-            # We can't match titles, but if both meta tags are there we say they match somewhat
-            return True
-    # TODO Add other cases if found
+        if (entry1.has_attr("name") and entry2.has_attr("name")
+                and entry1["name"] == entry2["name"]):
+            # Almost all meta tags are language dependent, and we can't match language dependent things,
+            # but if both meta tags are there we say they match somewhat
+            if entry1.has_attr("content") and entry2.has_attr("content"):
+                if entry1["name"] in ["viewport", "robots"]:
+                    return entry1["content"] == entry2["content"]
+                else:
+                    return True
+        if entry1.has_attribute("http-equiv") and entry2.has_attribute("http-equiv"):
+            return entry1["http-equiv"] == entry2["http-equiv"]
+
+    if entry1.name == entry2.name == "noscript":
+        return True
 
     return False
 
@@ -95,11 +119,20 @@ def radoy_header_ratio(a, b):
     for (x, y) in itertools.zip_longest(head1.children, head2.children):
         if x != y and not compare_entry(x, y):
             # Penalty for mismatch (deducted when found in the next step)
+<<<<<<< Updated upstream
             penalty += 1.2
             for r in head2.find_all(x.name if x is not None else y.name):
                 if compare_entry(x if x is not None else y, r):
-                    # We found a similar enough entry so let's deduct the penalty partly (position was still wrong)
+=======
+            penalty += 1
+            for r in head2.find_all(x.name):
+                if x == r:
+                    # Exactly match, deduct almost all penalty, still at wrong position
                     penalty -= 0.9
+                if compare_entry(x, r):
+>>>>>>> Stashed changes
+                    # We found a similar enough entry so let's deduct the penalty partly (position was still wrong)
+                    penalty -= 0.75
                     break
 
     return max(0, min(1, 1 - (penalty / len(list(soup1.head.children)))))
