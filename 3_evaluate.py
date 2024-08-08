@@ -20,10 +20,11 @@ import utils.json_serialization as json
 from utils.db import MongoDB, MongoCollection, Neo4j, connect_mongo, connect_neo4j, get_most_recent_collection_name
 from pymongo.collection import Collection
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning, MarkupResemblesLocatorWarning
 import warnings
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 
 class ScanContext:
@@ -54,22 +55,30 @@ def levenshtein_ratio(a, b):
 # Header can contains title, style, base(?), link, meta, script, noscript
 # For meta, see https://gist.github.com/lancejpollard/1978404
 def compare_entry(entry1, entry2):
-    if entry1 is None or entry2 is None: return False
+    if entry1 is None or entry2 is None:
+        return False
     if entry1.name == "script" and entry2.name == "script":
-        if entry1.has_attr("nonce"): entry1["nonce"] = "rand"
-        if entry2.has_attr("nonce"): entry2["nonce"] = "rand"
+        if entry1.has_attr("nonce"):
+            entry1["nonce"] = "rand"
+        if entry2.has_attr("nonce"):
+            entry2["nonce"] = "rand"
         if entry1.has_attr("src") and entry2.has_attr("src"):
             src1 = entry1["src"].split("?")[0]
             src2 = entry2["src"].split("?")[0]
             # TODO Should they be completely equal?
             return src1 == src2
-        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.75: return True
+        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.75:
+            return True
 
     if entry1.name == "link" and entry2.name == "link":
-        if entry1.has_attr("nonce"): entry1["nonce"] = "rand"
-        if entry2.has_attr("nonce"): entry2["nonce"] = "rand"
-        if entry1.has_attr("rel") and entry2.has_attr("rel") and entry1["rel"] != entry2["rel"]: return False
-        if entry1.has_attr("size") and entry2.has_attr("size") and entry1["size"] != entry2["size"]: return False
+        if entry1.has_attr("nonce"):
+            entry1["nonce"] = "rand"
+        if entry2.has_attr("nonce"):
+            entry2["nonce"] = "rand"
+        if entry1.has_attr("rel") and entry2.has_attr("rel") and entry1["rel"] != entry2["rel"]:
+            return False
+        if entry1.has_attr("size") and entry2.has_attr("size") and entry1["size"] != entry2["size"]:
+            return False
         if entry1.has_attr("href") and entry2.has_attr("href"):
             src1 = entry1["href"].split("?")[0]
             src2 = entry2["href"].split("?")[0]
@@ -78,14 +87,14 @@ def compare_entry(entry1, entry2):
         return False
 
     if entry1.name == entry2.name == "style":
-        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.9: return True
+        if Levenshtein.ratio(str(entry1), str(entry2)) > 0.9:
+            return True
 
     if entry1.name == "title" and entry2.name == "title":
         # We can't match titles, but we hope that both have a title tag
         return True
     if entry1.name == "meta" and entry2.name == "meta":
-        if (entry1.has_attr("name") and entry2.has_attr("name")
-                and entry1["name"] == entry2["name"]):
+        if entry1.has_attr("name") and entry2.has_attr("name") and entry1["name"] == entry2["name"]:
             # Almost all meta tags are language dependent, and we can't match language dependent things,
             # but if both meta tags are there we say they match somewhat
             if entry1.has_attr("content") and entry2.has_attr("content"):
@@ -93,7 +102,7 @@ def compare_entry(entry1, entry2):
                     return entry1["content"] == entry2["content"]
                 else:
                     return True
-        if entry1.has_attribute("http-equiv") and entry2.has_attribute("http-equiv"):
+        if entry1.has_attr("http-equiv") and entry2.has_attr("http-equiv"):
             return entry1["http-equiv"] == entry2["http-equiv"]
 
     if entry1.name == entry2.name == "noscript":
@@ -103,8 +112,8 @@ def compare_entry(entry1, entry2):
 
 
 def radoy_header_ratio(a, b):
-    soup1 = BeautifulSoup(a, 'html.parser')
-    soup2 = BeautifulSoup(b, 'html.parser')
+    soup1 = BeautifulSoup(a, "html.parser")
+    soup2 = BeautifulSoup(b, "html.parser")
     head1 = soup1.head
     head2 = soup2.head
     if head1 is None and head2 is not None or head1 is not None and head2 is None:
@@ -114,9 +123,9 @@ def radoy_header_ratio(a, b):
         return -1
 
     penalty = 0
-    penalty += 0.5*(abs(len(list(head1.children)) - len(list(head2.children)))**1.4)
+    penalty += 0.5 * (abs(len(list(head1.children)) - len(list(head2.children))) ** 1.4)
 
-    for (x, y) in itertools.zip_longest(head1.children, head2.children):
+    for x, y in itertools.zip_longest(head1.children, head2.children):
         if x != y and not compare_entry(x, y):
             # Penalty for mismatch (deducted when found in the next step)
             penalty += 1.25
@@ -160,6 +169,13 @@ class ComputedMetrics:
 
     @staticmethod
     def from_response(same_cert, body_resumption, body_other):
+        if body_resumption is None or body_other is None:
+            return ComputedMetrics(
+                same_cert=same_cert,
+                levenshtein_similarity=-1,
+                levenshtein_header_similarity=-1,
+                radoy_header_similarity=-1,
+            )
         return ComputedMetrics(
             same_cert=same_cert,
             levenshtein_similarity=levenshtein_ratio(body_resumption, body_other),
@@ -223,7 +239,14 @@ class Response:
         self.content_title = self._response.get("content_title", None)
         self.content_length = self._response.get("content_length", None)
         self.location = self._response.get("headers", {}).get("location", [])
-        assert len(self.location) < 2
+        if len(self.location) > 1:
+            if len(set(self.location)) == 1:
+                logging.warning(
+                    f"Same location was specified multiple times, reducing to one: {self.location} for {self._ip}"
+                )
+            else:
+                logging.fatal(f"Multiple distinct locations: {self.location} for {self._ip}")
+                raise AssertionError(f"Multiple distinct locations: {self.location}")
         self.location = self.location[0] if self.location else None
 
     def __str__(self) -> str:
@@ -256,11 +279,11 @@ class ResumptionClassification:
     value_redirect: Optional[str]
 
     def __init__(
-            self,
-            is_safe: Union[ResumptionClassificationType, bool],
-            reason: str,
-            reason_initial: Optional[str] = None,
-            reason_redirect: Optional[str] = None,
+        self,
+        is_safe: Union[ResumptionClassificationType, bool],
+        reason: str,
+        reason_initial: Optional[str] = None,
+        reason_redirect: Optional[str] = None,
     ):
         if isinstance(is_safe, bool):
             self.classification = ResumptionClassificationType.from_bool_is_safe(is_safe)
@@ -652,9 +675,13 @@ def cleanup_db():
 def analyze_collection(collection_filter=...):
     if collection_filter is ...:
         collection_filter = {"status": "SUCCESS"}
-    ScanContext.mongo_collection.create_index("initial._metrics", sparse=True)
+    # index creation blocks, hence removed for now
+    # the index is only useful in hindsight, so we actually do not care too much now
+    # logging.info("Creating index for eval results")
+    # ScanContext.mongo_collection.create_index("initial._metrics", sparse=True)
     results = {typ: dict() for typ in ResumptionClassificationType}
     db_items = ScanContext.mongo_collection.find(collection_filter)
+    logging.info("Counting documents")
     _COUNT = ScanContext.mongo_collection.count_documents(collection_filter)
     _START = time.time()
     _NUM = 0
@@ -662,12 +689,12 @@ def analyze_collection(collection_filter=...):
 
     # cleanup_db()
     # return
-    logging.info("Starting")
+    logging.info("Starting (total=%d)", _COUNT)
     with ProcessPool() as pool:
         # with ThreadPool(1) as pool:
         for result, classifications_and_metrics in pool.imap_unordered(analyze_item, db_items):
             _NUM += 1
-            if _NUM % 1000 == 0 or time.time() - _LAST_PRINT > 60:
+            if time.time() - _LAST_PRINT > 60:
                 _LAST_PRINT = time.time()
                 ETA = datetime.timedelta(seconds=(_COUNT - _NUM) / (_NUM / (time.time() - _START)))
                 pprint(results, stream=sys.stderr)
@@ -722,6 +749,6 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s | %(process)d %(processName)s - %(name)s.%(funcName)s: %(message)s",
     )
-    logging.getLogger("neo4j").setLevel(logging.WARNING)
-    # main()
-    test()
+    logging.getLogger("neo4j").setLevel(logging.CRITICAL)
+    main()
+    # test()
