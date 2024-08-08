@@ -46,8 +46,20 @@ class ScanContext:
         ScanContext.mongo_collection = database[mongo_collection_name]
 
 
+def catch_exceptions(func):
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logging.exception(f"Error in {func.__name__}: {e}")
+            return None
+
+    return wrapper
+
+
 # @functools.lru_cache(maxsize=1024 * 1024 * 10)
 @functools.wraps(Levenshtein.ratio)
+@catch_exceptions
 def levenshtein_ratio(a, b):
     return Levenshtein.ratio(a, b)
 
@@ -111,6 +123,7 @@ def compare_entry(entry1, entry2):
     return False
 
 
+@catch_exceptions
 def radoy_header_ratio(a, b):
     soup1 = BeautifulSoup(a, "html.parser")
     soup2 = BeautifulSoup(b, "html.parser")
@@ -138,7 +151,10 @@ def radoy_header_ratio(a, b):
                     penalty -= 0.75
                     break
 
-    return max(0, min(1, 1 - (penalty / len(list(soup1.head.children)))))
+    num_header_elements = len(list(soup1.head.children))
+    if num_header_elements == 0:
+        return 0
+    return max(0, min(1, 1 - (penalty / num_header_elements)))
 
 
 def extract_head(html: str, tag="head"):
@@ -154,6 +170,7 @@ def extract_head(html: str, tag="head"):
     return html[start:end]
 
 
+@catch_exceptions
 def levenshtein_header_similarity(a, b):
     head_a = extract_head(a)
     head_b = extract_head(b)
@@ -686,6 +703,7 @@ def analyze_collection(collection_filter=...):
     _START = time.time()
     _NUM = 0
     _LAST_PRINT = _START
+    _LAST_STAT_PRINT = _START
 
     # cleanup_db()
     # return
@@ -697,8 +715,9 @@ def analyze_collection(collection_filter=...):
             if time.time() - _LAST_PRINT > 60:
                 _LAST_PRINT = time.time()
                 ETA = datetime.timedelta(seconds=(_COUNT - _NUM) / (_NUM / (time.time() - _START)))
-                pprint(results, stream=sys.stderr)
-                sys.stderr.flush()
+                if time.time() - _LAST_STAT_PRINT > 600:
+                    _LAST_STAT_PRINT = _LAST_PRINT
+                    pprint(results)
                 print(
                     f"Processed {_NUM:}/{_COUNT} ({_NUM / _COUNT:6.2%}) in {time.time() - _START:.2f}s | {_NUM / (time.time() - _START):.2f} items/s | ETA {ETA}",
                 )
