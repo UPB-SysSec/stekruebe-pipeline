@@ -119,18 +119,12 @@ def radoy_header_ratio(a, b):
     for (x, y) in itertools.zip_longest(head1.children, head2.children):
         if x != y and not compare_entry(x, y):
             # Penalty for mismatch (deducted when found in the next step)
-<<<<<<< Updated upstream
-            penalty += 1.2
-            for r in head2.find_all(x.name if x is not None else y.name):
-                if compare_entry(x if x is not None else y, r):
-=======
-            penalty += 1
-            for r in head2.find_all(x.name):
+            penalty += 1.25
+            for r in head2.find_all(x.name) if x is not None else head1.find_all(y.name):
                 if x == r:
-                    # Exactly match, deduct almost all penalty, still at wrong position
-                    penalty -= 0.9
-                if compare_entry(x, r):
->>>>>>> Stashed changes
+                    # Exact match, deduct almost all penalty, still at wrong position
+                    penalty -= 1
+                if compare_entry(x if x is not None else y, r):
                     # We found a similar enough entry so let's deduct the penalty partly (position was still wrong)
                     penalty -= 0.75
                     break
