@@ -258,13 +258,12 @@ class Response:
         self.location = self._response.get("headers", {}).get("location", [])
         if len(self.location) > 1:
             if len(set(self.location)) == 1:
-                logging.warning(
+                logging.info(
                     f"Same location was specified multiple times, reducing to one: {self.location} for {self._ip}"
                 )
+                self.location = [self.location[0]]
             else:
-                logging.fatal(f"Multiple distinct locations: {self.location} for {self._ip}")
-                raise AssertionError(f"Multiple distinct locations: {self.location}")
-        self.location = self.location[0] if self.location else None
+                logging.warning(f"Multiple distinct locations: {self.location} for {self._ip}")
 
     def __str__(self) -> str:
         sha_format = f"{self.body_sha256:.6s}" if self.body_sha256 else "None"
@@ -410,11 +409,15 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
             # ... on resumption as well - was the location the same?
             if initial.location == resumption.location:
                 return ResumptionClassification.safe("location", initial.location, resumption.location)
+            if len(initial.location) > 1 or len(resumption.location) > 1:
+                return ResumptionClassification.not_applicable(
+                    "multiple locations specified in one response", initial.location, resumption.location
+                )
             # or at least same origin?
             return ResumptionClassification.assert_true(
-                are_same_origin(initial.location, resumption.location),
-                initial.location,
-                resumption.location,
+                are_same_origin(initial.location[0], resumption.location[0]),
+                initial.location[0],
+                resumption.location[0],
                 "location SOP",
             )
         # ... but not on resumption - which means the server is handling us differently
@@ -426,36 +429,43 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
 
     # if resumption 300 and initial 200 check redirect to original
     if resumption.status_code in range(300, 400):
-        assert resumption.location
-        parsed_location = urlparse(resumption.location.lower())
+        if not resumption.location:
+            return ResumptionClassification.not_applicable("resumption had no location even though 3XX code set")
+        if len(resumption.location) > 1:
+            return ResumptionClassification.not_applicable(
+                "multiple locations specified in one response", resumption.location
+            )
+        parsed_location = urlparse(resumption.location[0].lower())
         if not parsed_location.hostname and not parsed_location.scheme:
             # relative path -> NA
-            return ResumptionClassification.not_applicable("relative redirect on resumption", b=resumption.location)
+            return ResumptionClassification.not_applicable("relative redirect on resumption", b=resumption.location[0])
 
         if parsed_location.netloc == domain_from:
             if parsed_location.scheme == "https":
-                return ResumptionClassification.safe("redirect to original (https)", b=resumption.location)
+                return ResumptionClassification.safe("redirect to original (https)", b=resumption.location[0])
             if parsed_location.scheme == "http":
-                return ResumptionClassification.safe("redirect to original (http)", b=resumption.location)
+                return ResumptionClassification.safe("redirect to original (http)", b=resumption.location[0])
             if not parsed_location.scheme:
                 return ResumptionClassification.safe(
-                    "redirect to original (no scheme/implicit https)", b=resumption.location
-                )
-            return ResumptionClassification.not_applicable("redirect to original (other scheme)", b=resumption.location)
-        if parsed_location.netloc == "www." + domain_from:
-            if parsed_location.scheme == "https":
-                return ResumptionClassification.safe("redirect to www.original (https)", b=resumption.location)
-            if parsed_location.scheme == "http":
-                return ResumptionClassification.safe("redirect to www.original (http)", b=resumption.location)
-            if not parsed_location.scheme:
-                return ResumptionClassification.safe(
-                    "redirect to www.original (no scheme/implicit https)", b=resumption.location
+                    "redirect to original (no scheme/implicit https)", b=resumption.location[0]
                 )
             return ResumptionClassification.not_applicable(
-                "redirect to www.original (other scheme)", b=resumption.location
+                "redirect to original (other scheme)", b=resumption.location[0]
+            )
+        if parsed_location.netloc == "www." + domain_from:
+            if parsed_location.scheme == "https":
+                return ResumptionClassification.safe("redirect to www.original (https)", b=resumption.location[0])
+            if parsed_location.scheme == "http":
+                return ResumptionClassification.safe("redirect to www.original (http)", b=resumption.location[0])
+            if not parsed_location.scheme:
+                return ResumptionClassification.safe(
+                    "redirect to www.original (no scheme/implicit https)", b=resumption.location[0]
+                )
+            return ResumptionClassification.not_applicable(
+                "redirect to www.original (other scheme)", b=resumption.location[0]
             )
 
-        return ResumptionClassification.unsafe("redirect to different", None, resumption.location)
+        return ResumptionClassification.unsafe("redirect to different", None, resumption.location[0])
 
     if initial.body_sha256 is not None and initial.body_sha256 == resumption.body_sha256:
         # same content
