@@ -72,7 +72,7 @@ class ScanContext:
             )
 
             ScanContext.mongo_result_collection.create_index("domain_from")
-            ScanContext.mongo_result_collection.create_index("addr_from")
+            ScanContext.mongo_result_collection.create_index("addr_from.ip")
             ScanContext.mongo_result_collection.create_index("version")
             ScanContext.mongo_result_collection.create_index("status")
 
@@ -589,11 +589,22 @@ def print_dummy_query():
         .replace("$ip", '"172.217.128.200"')
     )
 
+
 def evaluate_domain(domain: str):
     assert isinstance(domain, str)
     return Domain(domain).evaluate()
 
-def main(parallelize, *, create_indexes=True, profile=False, dummy_scanner=False, explicit_collection=None, CLUSTER=None, LIMIT=None):
+
+def main(
+    parallelize,
+    *,
+    create_indexes=True,
+    profile=False,
+    dummy_scanner=False,
+    explicit_collection=None,
+    CLUSTER=None,
+    LIMIT=None,
+):
 
     ScanContext.initialize(
         mongo_collection_name=explicit_collection,
@@ -721,7 +732,7 @@ if __name__ == "__main__":
     # from utils import debug
     # debug.MemoryMonitor(key_type="traceback", limit=10, trace_depth=10).start()
     # main(64*3, explicit_collection="test")
-    main(64*3) # PROD
+    main(64 * 3)  # PROD
     # To find a test cluster MATCH (n:DOMAIN) RETURN n.clusterID, count(n.clusterID) as c ORDER BY c DESC
     # main(
     #     60,
