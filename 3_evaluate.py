@@ -598,8 +598,9 @@ def get_body_cert_for_ids(ids: list):
         "cert": "$initial.data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate",
     }
 
-    result = ScanContext.mongo_collection.find(filter=filter, projection=project)
-    for r in result:
+    results = ScanContext.mongo_collection.find(filter=filter, projection=project)
+    results = list(results)  # fetch immediately
+    for r in results:
         id = r.get("_id")
         body = r.get("body")
         cert = r.get("cert", {}).get("raw")
@@ -718,8 +719,7 @@ def analyze_collection(collection_filter=...):
     # cleanup_db()
     # return
     logging.info("Starting (total=%d)", _COUNT)
-    # just use more CPUs than we have; we are only CPU bound and do no external IO that could suffer, so ensure we use the max CPU we can
-    with ProcessPool(int(os.cpu_count() * 1.5)) as pool:
+    with ProcessPool() as pool:
         # with ThreadPool(1) as pool:
         for result, classifications_and_metrics in pool.imap_unordered(analyze_item, db_items):
             _NUM += 1
