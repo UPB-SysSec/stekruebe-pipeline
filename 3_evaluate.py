@@ -718,7 +718,8 @@ def analyze_collection(collection_filter=...):
     # cleanup_db()
     # return
     logging.info("Starting (total=%d)", _COUNT)
-    with ProcessPool() as pool:
+    # just use more CPUs than we have; we are only CPU bound and do no external IO that could suffer, so ensure we use the max CPU we can
+    with ProcessPool(int(os.cpu_count() * 1.5)) as pool:
         # with ThreadPool(1) as pool:
         for result, classifications_and_metrics in pool.imap_unordered(analyze_item, db_items):
             _NUM += 1
