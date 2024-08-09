@@ -20,9 +20,9 @@ fi
 
 echo "[#] Gathering Tickets"
 
-date
-python3 1_gather_tickets.py ../tranco_G6KVK.csv 1000000
-date
+date "+%s: %c"
+python3 1_gather_tickets.py ../tranco_XJLPN.csv 1000000
+date "+%s: %c"
 
 cat out/7_merged_zgrab.r*.json > out/7_merged_zgrab_all.json
 
@@ -34,9 +34,9 @@ if ! [ -d "import" ]; then
 fi
 
 echo "[#] Preparing for Neo4j"
-date
+date "+%s: %c"
 python3 generate_bulk_csv.py
-date
+date "+%s: %c"
 echo "[ ] Importing into Neo4j"
 ./import_csv.sh
 echo "[ ] Starting Neo4j"
@@ -47,11 +47,11 @@ echo "[ ] Generating Clusters"
 cd ..
 
 echo "[#] Running Scan (Sampling Neo4j)"
-date
+date "+%s: %c"
 python3 2_perform_redirection.py
-date
+date "+%s: %c"
 
-# echo "Running Evaluation"
-# date
-# python3 3_evaluate.py
-# date
+echo "Running Evaluation"
+date "+%s: %c"
+python3 3_evaluate.py
+date "+%s: %c"

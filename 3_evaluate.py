@@ -433,7 +433,7 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
             return ResumptionClassification.not_applicable("resumption had no location even though 3XX code set")
         if len(resumption.location) > 1:
             return ResumptionClassification.not_applicable(
-                "multiple locations specified in one response", resumption.location
+                "multiple locations specified in one response (initial was no redirect)", resumption.location
             )
         parsed_location = urlparse(resumption.location[0].lower())
         if not parsed_location.hostname and not parsed_location.scheme:
