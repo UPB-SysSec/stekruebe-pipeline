@@ -22,6 +22,8 @@ from pymongo.collection import Collection
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning, MarkupResemblesLocatorWarning
 import warnings
+from pymongo.errors import _OperationCancelled
+from pymongo import IndexModel
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
@@ -592,14 +594,26 @@ def get_body_cert_id_for_domain(domain):
 
 
 def get_body_cert_for_ids(ids: list):
+    if len(ids) > 1000:
+        if isinstance(ids, set):
+            ids = list(ids)
+        # Too many ids, will fetch in chunks
+        for i in range(0, len(ids), 1000):
+            yield from get_body_cert_for_ids(ids[i : i + 1000])
+        return
+
     filter = {"_id": {"$in": [ObjectId(bytes.fromhex(id)) for id in ids]}}
     project = {
         "body": "$initial.data.http.result.response.body",
         "cert": "$initial.data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate",
     }
 
-    results = ScanContext.mongo_collection.find(filter=filter, projection=project)
-    results = list(results)  # fetch immediately
+    try:
+        results = ScanContext.mongo_collection.find(filter=filter, projection=project)
+        results = list(results)  # fetch immediately
+    except _OperationCancelled:
+        logging.critical("Operation cancelled: %d ids=%s", len(ids), ids)
+        raise
     for r in results:
         id = r.get("_id")
         body = r.get("body")
@@ -658,20 +672,20 @@ def analyze_item(doc, insert_result: bool = True):
     # also compute similarities for initial connection, may be useful to ultimately classify resumptions
     # thus far only the similarities of the resumption and other domains (X) has been computed
     # we now compare the initial connection to all X and store the results
+    update_set = {"_analyzed": True}
     if resumption_classifications_and_metrics:
         initial_metrics = compute_initial_metrics(result, resumption_classifications_and_metrics)
 
-        update_set = {}
         if initial_metrics is not None:
             {"initial._metrics": initial_metrics.to_dict()}
         for i, (classification, metrics) in enumerate(resumption_classifications_and_metrics):
             update_set[f"redirect.{i}._classification"] = classification.to_dict()
             if metrics is not None:
                 update_set[f"redirect.{i}._metrics"] = metrics.to_dict()
-        if insert_result:
-            ScanContext.mongo_collection.update_one({"_id": doc_id}, {"$set": update_set}, upsert=False)
-        else:
-            logging.info(f"Would update {doc_id} ({result.domain_from}) with \n{pformat(update_set)}")
+    if insert_result:
+        ScanContext.mongo_collection.update_one({"_id": doc_id}, {"$set": update_set}, upsert=False)
+    else:
+        logging.info(f"Would update {doc_id} ({result.domain_from}) with \n{pformat(update_set)}")
 
     return result, resumption_classifications_and_metrics
 
@@ -702,7 +716,15 @@ def cleanup_db():
 
 def analyze_collection(collection_filter=...):
     if collection_filter is ...:
-        collection_filter = {"status": "SUCCESS"}
+        collection_filter = {"status": "SUCCESS", "_analyzed": {"$ne": True}}
+    logging.info("Creating index for analyzed flag")
+    ScanContext.mongo_collection.create_indexes(
+        [
+            IndexModel("_analyzed"),
+            IndexModel([("status", 1), ("_analyzed", 1)]),
+        ]
+    )
+
     # index creation blocks, hence removed for now
     # the index is only useful in hindsight, so we actually do not care too much now
     # logging.info("Creating index for eval results")
@@ -720,7 +742,6 @@ def analyze_collection(collection_filter=...):
     # return
     logging.info("Starting (total=%d)", _COUNT)
     with ProcessPool() as pool:
-        # with ThreadPool(1) as pool:
         for result, classifications_and_metrics in pool.imap_unordered(analyze_item, db_items):
             _NUM += 1
             if time.time() - _LAST_PRINT > 60:
