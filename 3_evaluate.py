@@ -666,6 +666,9 @@ def compute_initial_metrics(result: AnalyzedZgrab2ResumptionResult, resumption_c
 def analyze_item(doc, insert_result: bool = True):
     doc_id: ObjectId = doc["_id"]
     del doc["_id"]
+    if "_analyzed" in doc:
+        del doc["_analyzed"]
+
     result = AnalyzedZgrab2ResumptionResult(**doc)
     resumption_classifications_and_metrics = list(analyze_item_iter(result, doc_id))
 

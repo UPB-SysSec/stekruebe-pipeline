@@ -21,7 +21,7 @@ fi
 echo "[#] Gathering Tickets"
 
 date "+%s: %c"
-python3 1_gather_tickets.py ../tranco_XJLPN.csv 1000000
+python3 1_gather_tickets.py ../tranco_V9K7N.csv 1000000
 date "+%s: %c"
 
 cat out/7_merged_zgrab.r*.json > out/7_merged_zgrab_all.json
@@ -53,5 +53,6 @@ date "+%s: %c"
 
 echo "Running Evaluation"
 date "+%s: %c"
-python3 3_evaluate.py
+# python3 3_evaluate.py
+./3_evaluate_wrapper.sh
 date "+%s: %c"
