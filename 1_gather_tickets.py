@@ -743,7 +743,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             stats,
             EXEUTABLES.ZDNS,
             # "--alexa", # not necessary with stage DOMAIN_FROM_ALEXA_FORMAT, for consistency with subsequent runs
-            "alookup",
+            "nslookup",
             "--ipv4-lookup",
             "--ipv6-lookup",
             cache_as_format=FileFormat.TXT,
