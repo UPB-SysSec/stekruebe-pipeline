@@ -685,7 +685,7 @@ class CONST:
 class EXEUTABLES:
     JQ = "jq"
     CUT = "cut"
-    ZDNS = "zdns"
+    ZDNS = "/data/home/steckruebe/workspace/zdns/zdns"  # use zdns 1.1.0
     ZMAP4 = "zmap"
     ZMAP6 = "zmapv6"
     ZGRAB = "zgrab2_tls13"
@@ -743,7 +743,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             stats,
             EXEUTABLES.ZDNS,
             # "--alexa", # not necessary with stage DOMAIN_FROM_ALEXA_FORMAT, for consistency with subsequent runs
-            "nslookup",
+            "alookup",
             "--ipv4-lookup",
             "--ipv6-lookup",
             cache_as_format=FileFormat.TXT,
@@ -869,7 +869,7 @@ def test_zdns():
 
     _DEFAULT_ARGS = (
         "--alexa",
-        "nslookup",
+        "alookup",
         "--ipv4-lookup",
         "--ipv6-lookup",
     )
