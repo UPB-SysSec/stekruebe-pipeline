@@ -131,13 +131,18 @@ class _Stats:
         if self.domains.value == 0:
             ETA = None
             DURATION = None
+            PERCENT = 0
         else:
             ETA = (self.expected_domains - self.domains.value) / (self.domains.value / elapsed)
             DURATION = datetime.timedelta(seconds=elapsed + ETA)
             ETA = datetime.timedelta(seconds=ETA)
+            if self.expected_domains == 0:
+                PERCENT = 0
+            else:
+                PERCENT = self.domains.value / self.expected_domains
         ret = (
             f"Total: {self.domains.value}/{self.expected_domains} domains, {self.targets.value} targets in {elapsed:.2f} seconds | "
-            f"{self.domains.value/elapsed:.2f} domains/s {100.0*self.domains.value/self.expected_domains:5.2f}% | "
+            f"{self.domains.value/elapsed:.2f} domains/s {PERCENT:6.2%} | "
             f"ETA: {ETA} / Total: {DURATION} | "
             f"{self.targets.value/elapsed:.2f} targets/s"
         )
