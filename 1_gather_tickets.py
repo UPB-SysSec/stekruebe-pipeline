@@ -869,7 +869,7 @@ def test_zdns():
 
     _DEFAULT_ARGS = (
         "--alexa",
-        "alookup",
+        "nslookup",
         "--ipv4-lookup",
         "--ipv6-lookup",
     )
