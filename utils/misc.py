@@ -1,4 +1,7 @@
 import re
+import logging
+
+LOGGER = logging.getLogger(__name__)
 
 REGEXES = {
     "title": re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL),
@@ -42,3 +45,21 @@ assert (
     )
     == "[title]chevron-right"
 )
+
+
+def catch_exceptions(func):
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            LOGGER.exception(f"Error in {func.__name__}: {e}")
+            return None
+
+    return wrapper
+
+
+def limit(iterable, limit):
+    for i, item in enumerate(iterable):
+        if i >= limit:
+            break
+        yield item

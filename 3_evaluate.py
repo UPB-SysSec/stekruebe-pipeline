@@ -1,29 +1,32 @@
-import itertools
-import logging
-from pprint import pprint, pformat
-from neo4j import GraphDatabase
-from bson import ObjectId
-from enum import Enum
-from dataclasses import dataclass
-from typing import Union, Optional
-from utils.credentials import mongodb_creds, neo4j_creds
-from utils.result import Zgrab2ResumptionResult
-import Levenshtein
-from multiprocessing.pool import ThreadPool
-from multiprocessing.pool import Pool as ProcessPool
-import os
-import time
 import datetime
 import functools
+import itertools
+import logging
+import os
 import sys
-import utils.json_serialization as json
-from utils.db import MongoDB, MongoCollection, Neo4j, connect_mongo, connect_neo4j, get_most_recent_collection_name
-from pymongo.collection import Collection
-from urllib.parse import urlparse
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning, MarkupResemblesLocatorWarning
+import time
 import warnings
-from pymongo.errors import _OperationCancelled
+from dataclasses import dataclass
+from enum import Enum
+from multiprocessing.pool import Pool as ProcessPool
+from multiprocessing.pool import ThreadPool
+from pprint import pformat, pprint
+from typing import Optional, Union
+from urllib.parse import urlparse
+
+import bson
+import Levenshtein
+import utils.json_serialization as json
+from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, XMLParsedAsHTMLWarning
+from bson import ObjectId
+from neo4j import GraphDatabase
 from pymongo import IndexModel
+from pymongo.collection import Collection
+from pymongo.errors import DocumentTooLarge, _OperationCancelled
+from utils.credentials import mongodb_creds, neo4j_creds
+from utils.db import MongoCollection, MongoDB, Neo4j, connect_mongo, connect_neo4j, get_most_recent_collection_name
+from utils.result import Zgrab2ResumptionResult
+from utils.misc import catch_exceptions
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
@@ -48,15 +51,62 @@ class ScanContext:
         ScanContext.mongo_collection = database[mongo_collection_name]
 
 
-def catch_exceptions(func):
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            logging.exception(f"Error in {func.__name__}: {e}")
-            return None
+class Response:
+    def __init__(self, zgrabHttpOutput):
+        self._zgrabHttpOutput = zgrabHttpOutput
+        self._ip = zgrabHttpOutput["ip"]
+        if zgrabHttpOutput["data"]["http"].get("error", False):
+            self._response = {}
+            self._handshake_log = {}
+        else:
+            self._response = zgrabHttpOutput["data"]["http"]["result"]["response"]
+            self._handshake_log = self._response["request"]["tls_log"]["handshake_log"]
+        self.resumed = "server_certificates" not in self._handshake_log
+        if self.resumed:
+            self.certificate = None
+            self.parsed_certificate = None
+        else:
+            self.certificate = self._handshake_log["server_certificates"]["certificate"]["raw"]
+            self.parsed_certificate = self._handshake_log["server_certificates"]["certificate"].get("parsed")
+        self.status_code = self._response.get("status_code", -1)
+        self.body_sha256 = self._response.get("body_sha256", None)
+        self.body = self._response.get("body", None)
+        self.body_len = self._response.get("body_len", None)
+        self.content_title = self._response.get("content_title", None)
+        self.content_length = self._response.get("content_length", None)
+        self.location = self._response.get("headers", {}).get("location", [])
+        if len(self.location) > 1:
+            if len(set(self.location)) == 1:
+                logging.info(
+                    f"Same location was specified multiple times, reducing to one: {self.location} for {self._ip}"
+                )
+                self.location = [self.location[0]]
+            else:
+                logging.warning(f"Multiple distinct locations: {self.location} for {self._ip}")
 
-    return wrapper
+    def __str__(self) -> str:
+        sha_format = f"{self.body_sha256:.6s}" if self.body_sha256 else "None"
+        return f"Response(status_code={self.status_code!r}, body_sha256={sha_format}, content_title={self.content_title!r:.50}, content_length={self.content_length!r}, body_len={self.body_len!r}, location={self.location!r})"
+
+    def __repr__(self) -> str:
+        return f"Response(status_code={self.status_code!r}, body_sha256={self.body_sha256!r}, content_title={self.content_title!r:.50}, content_length={self.content_length!r}, body_len={self.body_len!r}, location={self.location!r})"
+
+
+@dataclass
+class AnalyzedZgrab2ResumptionResult(Zgrab2ResumptionResult):
+    """Convinience Class; transforms initial and redirect into response objects rather than dicts"""
+
+    initial: Response = None
+    redirect: list[Response] = None
+
+    def __post_init__(self):
+        if self.initial:
+            self.initial = Response(self.initial)
+        if self.redirect:
+            self.redirect = [Response(r) for r in self.redirect]
+
+
+# region Actual Metrics
 
 
 # @functools.lru_cache(maxsize=1024 * 1024 * 10)
@@ -161,8 +211,8 @@ def radoy_header_ratio(a, b):
 
 def extract_head(html: str, tag="head"):
     # naive way to find head
-    start = html.find(f"<head")
-    end = html.find("</head")
+    start = html.find(f"<{tag}")
+    end = html.find(f"</{tag}")
     if start == -1 and end == -1:
         # no head in here
         return ""
@@ -177,6 +227,11 @@ def levenshtein_header_similarity(a, b):
     head_a = extract_head(a)
     head_b = extract_head(b)
     return levenshtein_ratio(head_a, head_b)
+
+
+# endregion Actual Metrics
+
+# region Metrics Dataclasses and Logic
 
 
 @dataclass
@@ -234,45 +289,174 @@ class ComputedMetricsHolder:
         return json.loads(json.dumps(self))
 
 
-class Response:
-    def __init__(self, zgrabHttpOutput):
-        self._zgrabHttpOutput = zgrabHttpOutput
-        self._ip = zgrabHttpOutput["ip"]
-        if zgrabHttpOutput["data"]["http"].get("error", False):
-            self._response = {}
-            self._handshake_log = {}
-        else:
-            self._response = zgrabHttpOutput["data"]["http"]["result"]["response"]
-            self._handshake_log = self._response["request"]["tls_log"]["handshake_log"]
-        self.resumed = "server_certificates" not in self._handshake_log
-        if self.resumed:
-            self.certificate = None
-            self.parsed_certificate = None
-        else:
-            self.certificate = self._handshake_log["server_certificates"]["certificate"]["raw"]
-            self.parsed_certificate = self._handshake_log["server_certificates"]["certificate"].get("parsed")
-        self.status_code = self._response.get("status_code", -1)
-        self.body_sha256 = self._response.get("body_sha256", None)
-        self.body = self._response.get("body", None)
-        self.body_len = self._response.get("body_len", None)
-        self.content_title = self._response.get("content_title", None)
-        self.content_length = self._response.get("content_length", None)
-        self.location = self._response.get("headers", {}).get("location", [])
-        if len(self.location) > 1:
-            if len(set(self.location)) == 1:
-                logging.info(
-                    f"Same location was specified multiple times, reducing to one: {self.location} for {self._ip}"
-                )
-                self.location = [self.location[0]]
+def summarize_metrics(domain_ratios: dict[str, ComputedMetrics]) -> dict[str, ComputedMetricsSummary]:
+    # compute summary; for each metric find min/max for same/diff cert
+    summary = {}
+    ratio_names = [x[0] for x in ComputedMetrics.__dataclass_fields__.items() if x[1].type == float]
+    for ratio_name in ratio_names:
+        initial_value = None
+        if "initial" in domain_ratios:
+            initial_value = getattr(domain_ratios["initial"], ratio_name)
+        # ugly code, but it works :shrug:
+        min_same_cert_name = None
+        min_same_cert_value = None
+        min_diff_cert_name = None
+        min_diff_cert_value = None
+        max_same_cert_name = None
+        max_same_cert_value = None
+        max_diff_cert_name = None
+        max_diff_cert_value = None
+        for k, v in domain_ratios.items():
+            if k == "initial":
+                continue
+            ratio = getattr(v, ratio_name)
+            if v.same_cert:
+                if not min_same_cert_name or ratio < min_same_cert_value:
+                    min_same_cert_name = k
+                    min_same_cert_value = ratio
+                if not max_same_cert_name or ratio > max_same_cert_value:
+                    max_same_cert_name = k
+                    max_same_cert_value = ratio
             else:
-                logging.warning(f"Multiple distinct locations: {self.location} for {self._ip}")
+                if not min_diff_cert_name or ratio < min_diff_cert_value:
+                    min_diff_cert_name = k
+                    min_diff_cert_value = ratio
+                if not max_diff_cert_name or ratio > max_diff_cert_value:
+                    max_diff_cert_name = k
+                    max_diff_cert_value = ratio
+        summary[ratio_name] = ComputedMetricsSummary(
+            initial_value=initial_value,
+            min_same_cert_name=min_same_cert_name,
+            min_same_cert_value=min_same_cert_value,
+            min_diff_cert_name=min_diff_cert_name,
+            min_diff_cert_value=min_diff_cert_value,
+            max_same_cert_name=max_same_cert_name,
+            max_same_cert_value=max_same_cert_value,
+            max_diff_cert_name=max_diff_cert_name,
+            max_diff_cert_value=max_diff_cert_value,
+        )
+    return summary
 
-    def __str__(self) -> str:
-        sha_format = f"{self.body_sha256:.6s}" if self.body_sha256 else "None"
-        return f"Response(status_code={self.status_code!r}, body_sha256={sha_format}, content_title={self.content_title!r:.50}, content_length={self.content_length!r}, body_len={self.body_len!r}, location={self.location!r})"
 
-    def __repr__(self) -> str:
-        return f"Response(status_code={self.status_code!r}, body_sha256={self.body_sha256!r}, content_title={self.content_title!r:.50}, content_length={self.content_length!r}, body_len={self.body_len!r}, location={self.location!r})"
+def extract_subjects(parsed_cert):
+    subjects = []
+    if not parsed_cert:
+        return subjects
+    try:
+        subjects.extend(parsed_cert["subject"]["common_name"])
+    except KeyError:
+        pass
+    try:
+        subjects.extend(parsed_cert["extensions"]["subject_alt_name"]["dns_names"])
+    except KeyError:
+        pass
+    # get rid of wildcards and add www. if not present
+    subjects = [s.lstrip("*.") for s in subjects]
+    subjects = subjects + [f"www.{s}" for s in subjects if not s.startswith("www.")]
+    return list(set(subjects))
+
+
+def get_domains_on_ip(ip):
+    _QUERY = """MATCH (x:DOMAIN)--(y:IP {{ip: "{ip}"}}) RETURN DISTINCT x"""
+    query = _QUERY.format(ip=ip)
+    records, summary, keys = ScanContext.neo4j.execute_query(query)
+    d = [r.data()["x"]["domain"] for r in records]
+    logging.debug(f"Got {len(d)} domains on {ip}")
+    return d
+
+
+def get_domain_neighborhood(domain, limit=None):
+    _QUERY = """MATCH (x:DOMAIN {{domain:"{base_domain}"}})--(y:PREFIX)--(z:DOMAIN) RETURN DISTINCT z"""
+    if limit:
+        assert isinstance(limit, int)
+        _QUERY += f" LIMIT {limit}"
+    query = _QUERY.format(base_domain=domain, limit=limit)
+    records, summary, keys = ScanContext.neo4j.execute_query(query)
+    d = [r.data()["z"]["domain"] for r in records]
+    logging.debug(f"Got {len(d)} neighbors for {domain}")
+    return d
+
+
+def get_body_cert_id_for_domain(domain):
+    filter = {"domain_from": domain}
+    project = {
+        "body": "$initial.data.http.result.response.body",
+        "cert": "$initial.data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate",
+    }
+
+    result = ScanContext.mongo_collection.find(filter=filter, projection=project)
+    seen_body_certs = set()
+    for r in result:
+        body = r.get("body")
+        cert = r.get("cert", {}).get("raw")
+        id = r.get("_id")
+        if cert:
+            ret = (body, cert)
+            if ret not in seen_body_certs:
+                seen_body_certs.add(ret)
+                yield body, cert, id
+
+
+def get_body_cert_for_ids(ids: list):
+    if len(ids) > 1000:
+        if isinstance(ids, set):
+            ids = list(ids)
+        # Too many ids, will fetch in chunks
+        for i in range(0, len(ids), 1000):
+            yield from get_body_cert_for_ids(ids[i : i + 1000])
+        return
+
+    filter = {"_id": {"$in": [ObjectId(bytes.fromhex(id)) for id in ids]}}
+    project = {
+        "body": "$initial.data.http.result.response.body",
+        "cert": "$initial.data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate",
+    }
+
+    try:
+        results = ScanContext.mongo_collection.find(filter=filter, projection=project)
+        results = list(results)  # fetch immediately
+    except _OperationCancelled:
+        logging.critical("Operation cancelled: %d ids=%s", len(ids), ids)
+        raise
+    for r in results:
+        id = r.get("_id")
+        body = r.get("body")
+        cert = r.get("cert", {}).get("raw")
+        if cert:
+            yield id.binary.hex(), (body, cert)
+
+
+def compute_metrics(initial: Response, resumption: Response, domain_from: str, initial_doc_id):
+    if not resumption.body:
+        return None
+    if not resumption.resumed:
+        return None
+
+    domain_ratios = {"initial": ComputedMetrics.from_response(True, resumption.body, initial.body)}
+    relevant_domains = set(
+        get_domains_on_ip(resumption._ip)
+        + extract_subjects(initial.parsed_certificate)
+        # + get_domain_neighborhood(domain_from)
+    )
+    for neighbor_domain in relevant_domains:
+        for neighbor_body, neighbor_cert, neighbor_id in get_body_cert_id_for_domain(neighbor_domain):
+            if neighbor_id == initial_doc_id:
+                # we already computed 'initial' separately
+                continue
+            if not neighbor_body:
+                continue
+            key = f"{neighbor_domain}[{neighbor_id}]"
+            assert key not in domain_ratios
+            domain_ratios[key] = ComputedMetrics.from_response(
+                initial.certificate == neighbor_cert, resumption.body, neighbor_body
+            )
+
+    return ComputedMetricsHolder(metrics_summary=summarize_metrics(domain_ratios), domain_details=domain_ratios)
+
+
+# endregion Metrics Dataclasses and Logic
+
+# region Classification
 
 
 class ResumptionClassificationType(Enum):
@@ -338,36 +522,6 @@ class ResumptionClassification:
     def to_dict(self):
         # dirty way to convert to serializable for DB
         return json.loads(json.dumps(self))
-
-
-@dataclass
-class AnalyzedZgrab2ResumptionResult(Zgrab2ResumptionResult):
-    initial: Response = None
-    redirect: list[Response] = None
-
-    def __post_init__(self):
-        if self.initial:
-            self.initial = Response(self.initial)
-        if self.redirect:
-            self.redirect = [Response(r) for r in self.redirect]
-
-
-def extract_subjects(parsed_cert):
-    subjects = []
-    if not parsed_cert:
-        return subjects
-    try:
-        subjects.extend(parsed_cert["subject"]["common_name"])
-    except KeyError:
-        pass
-    try:
-        subjects.extend(parsed_cert["extensions"]["subject_alt_name"]["dns_names"])
-    except KeyError:
-        pass
-    # get rid of wildcards and add www. if not present
-    subjects = [s.lstrip("*.") for s in subjects]
-    subjects = subjects + [f"www.{s}" for s in subjects if not s.startswith("www.")]
-    return list(set(subjects))
 
 
 def are_same_origin(url1, url2):
@@ -475,159 +629,16 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
     return ResumptionClassification.not_applicable("No easy way out -> metrics")
 
 
-def summarize_metrics(domain_ratios: dict[str, ComputedMetrics]) -> dict[str, ComputedMetricsSummary]:
-    # compute summary; for each metric find min/max for same/diff cert
-    summary = {}
-    ratio_names = [x[0] for x in ComputedMetrics.__dataclass_fields__.items() if x[1].type == float]
-    for ratio_name in ratio_names:
-        initial_value = None
-        if "initial" in domain_ratios:
-            initial_value = getattr(domain_ratios["initial"], ratio_name)
-        # ugly code, but it works :shrug:
-        min_same_cert_name = None
-        min_same_cert_value = None
-        min_diff_cert_name = None
-        min_diff_cert_value = None
-        max_same_cert_name = None
-        max_same_cert_value = None
-        max_diff_cert_name = None
-        max_diff_cert_value = None
-        for k, v in domain_ratios.items():
-            if k == "initial":
-                continue
-            ratio = getattr(v, ratio_name)
-            if v.same_cert:
-                if not min_same_cert_name or ratio < min_same_cert_value:
-                    min_same_cert_name = k
-                    min_same_cert_value = ratio
-                if not max_same_cert_name or ratio > max_same_cert_value:
-                    max_same_cert_name = k
-                    max_same_cert_value = ratio
-            else:
-                if not min_diff_cert_name or ratio < min_diff_cert_value:
-                    min_diff_cert_name = k
-                    min_diff_cert_value = ratio
-                if not max_diff_cert_name or ratio > max_diff_cert_value:
-                    max_diff_cert_name = k
-                    max_diff_cert_value = ratio
-        summary[ratio_name] = ComputedMetricsSummary(
-            initial_value=initial_value,
-            min_same_cert_name=min_same_cert_name,
-            min_same_cert_value=min_same_cert_value,
-            min_diff_cert_name=min_diff_cert_name,
-            min_diff_cert_value=min_diff_cert_value,
-            max_same_cert_name=max_same_cert_name,
-            max_same_cert_value=max_same_cert_value,
-            max_diff_cert_name=max_diff_cert_name,
-            max_diff_cert_value=max_diff_cert_value,
-        )
-    return summary
-
-
-def compute_metrics(initial: Response, resumption: Response, domain_from: str, initial_doc_id):
-    if not resumption.body:
-        return None
-    if not resumption.resumed:
-        return None
-
-    domain_ratios = {"initial": ComputedMetrics.from_response(True, resumption.body, initial.body)}
-    relevant_domains = set(
-        get_domains_on_ip(resumption._ip)
-        + extract_subjects(initial.parsed_certificate)
-        # + get_domain_neighborhood(domain_from)
-    )
-    for neighbor_domain in relevant_domains:
-        for neighbor_body, neighbor_cert, neighbor_id in get_body_cert_id_for_domain(neighbor_domain):
-            if neighbor_id == initial_doc_id:
-                # we already computed 'initial' separately
-                continue
-            if not neighbor_body:
-                continue
-            key = f"{neighbor_domain}[{neighbor_id}]"
-            assert key not in domain_ratios
-            domain_ratios[key] = ComputedMetrics.from_response(
-                initial.certificate == neighbor_cert, resumption.body, neighbor_body
-            )
-
-    return ComputedMetricsHolder(metrics_summary=summarize_metrics(domain_ratios), domain_details=domain_ratios)
-
-
-def get_domains_on_ip(ip):
-    _QUERY = """MATCH (x:DOMAIN)--(y:IP {{ip: "{ip}"}}) RETURN DISTINCT x"""
-    query = _QUERY.format(ip=ip)
-    records, summary, keys = ScanContext.neo4j.execute_query(query)
-    d = [r.data()["x"]["domain"] for r in records]
-    logging.debug(f"Got {len(d)} domains on {ip}")
-    return d
-
-
-def get_domain_neighborhood(domain, limit=None):
-    _QUERY = """MATCH (x:DOMAIN {{domain:"{base_domain}"}})--(y:PREFIX)--(z:DOMAIN) RETURN DISTINCT z"""
-    if limit:
-        assert isinstance(limit, int)
-        _QUERY += f" LIMIT {limit}"
-    query = _QUERY.format(base_domain=domain, limit=limit)
-    records, summary, keys = ScanContext.neo4j.execute_query(query)
-    d = [r.data()["z"]["domain"] for r in records]
-    logging.debug(f"Got {len(d)} neighbors for {domain}")
-    return d
-
-
-def get_body_cert_id_for_domain(domain):
-    filter = {"domain_from": domain}
-    project = {
-        "body": "$initial.data.http.result.response.body",
-        "cert": "$initial.data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate",
-    }
-
-    result = ScanContext.mongo_collection.find(filter=filter, projection=project)
-    seen_body_certs = set()
-    for r in result:
-        body = r.get("body")
-        cert = r.get("cert", {}).get("raw")
-        id = r.get("_id")
-        if cert:
-            ret = (body, cert)
-            if ret not in seen_body_certs:
-                seen_body_certs.add(ret)
-                yield body, cert, id
-
-
-def get_body_cert_for_ids(ids: list):
-    if len(ids) > 1000:
-        if isinstance(ids, set):
-            ids = list(ids)
-        # Too many ids, will fetch in chunks
-        for i in range(0, len(ids), 1000):
-            yield from get_body_cert_for_ids(ids[i : i + 1000])
-        return
-
-    filter = {"_id": {"$in": [ObjectId(bytes.fromhex(id)) for id in ids]}}
-    project = {
-        "body": "$initial.data.http.result.response.body",
-        "cert": "$initial.data.http.result.response.request.tls_log.handshake_log.server_certificates.certificate",
-    }
-
-    try:
-        results = ScanContext.mongo_collection.find(filter=filter, projection=project)
-        results = list(results)  # fetch immediately
-    except _OperationCancelled:
-        logging.critical("Operation cancelled: %d ids=%s", len(ids), ids)
-        raise
-    for r in results:
-        id = r.get("_id")
-        body = r.get("body")
-        cert = r.get("cert", {}).get("raw")
-        if cert:
-            yield id.binary.hex(), (body, cert)
+# endregion Classification
 
 
 def analyze_item_iter(result: AnalyzedZgrab2ResumptionResult, initial_doc_id):
     for redirected in result.redirect:
         # redirected: Response = redirected
         try:
-            yield classify_resumption(result.initial, redirected, result.domain_from), compute_metrics(
-                result.initial, redirected, result.domain_from, initial_doc_id
+            yield (
+                classify_resumption(result.initial, redirected, result.domain_from),
+                compute_metrics(result.initial, redirected, result.domain_from, initial_doc_id),
             )
         except Exception as e:
             logging.exception(
@@ -663,8 +674,15 @@ def compute_initial_metrics(result: AnalyzedZgrab2ResumptionResult, resumption_c
     return ComputedMetricsHolder(metrics_summary=summarize_metrics(initial_metrics), domain_details=initial_metrics)
 
 
+def bson_length(doc):
+    if isinstance(doc, dict):
+        return len(bson.BSON.encode(doc))
+    return -1
+
+
 def analyze_item(doc, insert_result: bool = True):
     doc_id: ObjectId = doc["_id"]
+    _doc_size = bson_length(doc)
     del doc["_id"]
     if "_analyzed" in doc:
         del doc["_analyzed"]
@@ -676,6 +694,7 @@ def analyze_item(doc, insert_result: bool = True):
     # thus far only the similarities of the resumption and other domains (X) has been computed
     # we now compare the initial connection to all X and store the results
     update_set = {"_analyzed": True}
+    initial_metrics = None
     if resumption_classifications_and_metrics:
         initial_metrics = compute_initial_metrics(result, resumption_classifications_and_metrics)
 
@@ -686,35 +705,30 @@ def analyze_item(doc, insert_result: bool = True):
             if metrics is not None:
                 update_set[f"redirect.{i}._metrics"] = metrics.to_dict()
     if insert_result:
-        ScanContext.mongo_collection.update_one({"_id": doc_id}, {"$set": update_set}, upsert=False)
+        try:
+            ScanContext.mongo_collection.update_one({"_id": doc_id}, {"$set": update_set}, upsert=False)
+        except DocumentTooLarge as e:
+            _update_size = bson_length(update_set)
+            logging.critical(f"Error updating {doc_id}: {e}")
+            for k, v in update_set.items():
+                logging.critical(f"- update.{k}: {bson_length(v):,}")
+            if resumption_classifications_and_metrics:
+                logging.critical(f"Compared initial body with {len(initial_metrics.domain_details):,} other bodies")
+                for i, (_, metrics) in enumerate(resumption_classifications_and_metrics):
+                    if metrics is not None:
+                        logging.critical(f"Compared redirect.{i} with {len(metrics.domain_details):,} other bodies")
+                    else:
+                        logging.critical(f"Compared redirect.{i} with no other bodies")
+            else:
+                logging.critical(f"Update set: {update_set}")
+            logging.critical(f"Initial document size: {_doc_size:,}, update size: {_update_size:,}")
+            logging.error("Error updating %s; skipping and setting it to alledgedly analyzed :eyes:", doc_id)
+            update_set = {"_analyzed": True, "_analysis_errored": True}
+            ScanContext.mongo_collection.update_one({"_id": doc_id}, {"$set": update_set}, upsert=False)
     else:
         logging.info(f"Would update {doc_id} ({result.domain_from}) with \n{pformat(update_set)}")
 
     return result, resumption_classifications_and_metrics
-
-
-def limit(iterable, limit):
-    for i, item in enumerate(iterable):
-        if i >= limit:
-            break
-        yield item
-
-
-def cleanup_db():
-    logging.info("Cleaning up DB")
-    docs_cleant_up = 0
-    fields_removed = 0
-    for doc in ScanContext.mongo_collection.find({"initial._similarities": {"$exists": True}}):
-        fields_to_remove = {"initial._similarities"}
-        for i, redirect in enumerate(doc["redirect"]):
-            if "_classification" in redirect:
-                fields_to_remove.add(f"redirect.{i}._classification")
-        update = {"$unset": {x: 1 for x in fields_to_remove}}
-        fields_removed += len(fields_to_remove)
-        docs_cleant_up += 1
-        logging.debug(f"Cleaning up {doc['_id']}: removing {fields_to_remove}")
-        ScanContext.mongo_collection.update_one({"_id": doc["_id"]}, update, upsert=False)
-    logging.info(f"Cleaned up {docs_cleant_up} documents, removed {fields_removed} fields")
 
 
 def analyze_collection(collection_filter=...):
@@ -773,6 +787,23 @@ def main(collection_name=None, collection_filter=...):
     analyze_collection(collection_filter=collection_filter)
 
 
+def cleanup_db():
+    logging.info("Cleaning up DB")
+    docs_cleant_up = 0
+    fields_removed = 0
+    for doc in ScanContext.mongo_collection.find({"initial._similarities": {"$exists": True}}):
+        fields_to_remove = {"initial._similarities"}
+        for i, redirect in enumerate(doc["redirect"]):
+            if "_classification" in redirect:
+                fields_to_remove.add(f"redirect.{i}._classification")
+        update = {"$unset": {x: 1 for x in fields_to_remove}}
+        fields_removed += len(fields_to_remove)
+        docs_cleant_up += 1
+        logging.debug(f"Cleaning up {doc['_id']}: removing {fields_to_remove}")
+        ScanContext.mongo_collection.update_one({"_id": doc["_id"]}, update, upsert=False)
+    logging.info(f"Cleaned up {docs_cleant_up} documents, removed {fields_removed} fields")
+
+
 def test():
     from tqdm import tqdm
 
@@ -801,7 +832,7 @@ def test():
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)-7s | %(process)d %(processName)s - %(name)s.%(funcName)s: %(message)s",
+        format="%(asctime)s %(levelname)-8s | %(process)d %(processName)s - %(name)s.%(funcName)s: %(message)s",
     )
     logging.getLogger("neo4j").setLevel(logging.CRITICAL)
     main()

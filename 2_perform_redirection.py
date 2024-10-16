@@ -75,6 +75,9 @@ class ScanContext:
             ScanContext.mongo_result_collection.create_index("addr_from.ip")
             ScanContext.mongo_result_collection.create_index("version")
             ScanContext.mongo_result_collection.create_index("status")
+            # prepare indexes for 3_evaluate; now it is basically free, later it costs some time
+            ScanContext.mongo_result_collection.create_index("_analyzed")
+            ScanContext.mongo_result_collection.create_index([("status", 1), ("_analyzed", 1)])
 
 
 class _Stats:
