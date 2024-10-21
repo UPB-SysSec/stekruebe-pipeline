@@ -233,109 +233,209 @@ def levenshtein_header_similarity(a, b):
 
 # region Metrics Dataclasses and Logic
 
+MetricValue = Optional[float]
+MetricName = str
+Metrics = dict[MetricName, MetricValue]
+BodyId = str
 
-@dataclass
-class ComputedMetrics:
-    same_cert: bool
-    levenshtein_similarity: float
-    levenshtein_header_similarity: float
-    radoy_header_similarity: float
 
-    @staticmethod
-    def from_response(same_cert, body_resumption, body_other):
-        if body_resumption is None or body_other is None:
-            return ComputedMetrics(
-                same_cert=same_cert,
-                levenshtein_similarity=-1,
-                levenshtein_header_similarity=-1,
-                radoy_header_similarity=-1,
-            )
-        return ComputedMetrics(
-            same_cert=same_cert,
-            levenshtein_similarity=levenshtein_ratio(body_resumption, body_other),
-            levenshtein_header_similarity=levenshtein_header_similarity(body_resumption, body_other),
-            radoy_header_similarity=radoy_header_ratio(body_resumption, body_other),
+def compute_single_metrics(resumption_body: str, other_body: str, key_prefix=""):
+    ret = {}
+    if resumption_body and other_body:
+        ret.update(
+            {
+                f"{key_prefix}levenshtein_similarity": levenshtein_ratio(resumption_body, other_body),
+                f"{key_prefix}levenshtein_header_similarity": levenshtein_header_similarity(
+                    resumption_body, other_body
+                ),
+                f"{key_prefix}radoy_header_similarity": radoy_header_ratio(resumption_body, other_body),
+                f"{key_prefix}bag_of_paths_similarity": bag_of_paths_similarity(resumption_body, other_body),
+            }
         )
+    return ret
 
-    def to_dict(self):
-        # dirty way to convert to serializable for DB
-        return json.loads(json.dumps(self))
+
+def compute_single_metrics_with_initial(initial_body: str, resumption_body: str, other_body: str):
+    ret = {}
+    if resumption_body and other_body:
+        ret.update(compute_single_metrics(resumption_body, other_body))
+        ret.update(compute_single_metrics(initial_body, other_body, key_prefix="initial_"))
+    return ret
+
+
+class _MinMaxHolder(BaseModel):
+    min: tuple[str, MetricValue] = Field(default=(None, None))
+    max: tuple[str, MetricValue] = Field(default=(None, None))
+
+    def update(self, key, value):
+        if self.max[0] is None or value > self.max[1]:
+            self.max = (key, value)
+        if self.min[0] is None or value < self.min[1]:
+            self.min = (key, value)
 
 
 @dataclass
-class ComputedMetricsSummary:
+class ComputedMetricsSummary(BaseModel):
     initial_value: float
-    min_same_cert_name: str
-    min_same_cert_value: float
-    min_diff_cert_name: str
-    min_diff_cert_value: float
-    max_same_cert_name: str
-    max_same_cert_value: float
-    max_diff_cert_name: str
-    max_diff_cert_value: float
+    same_cert: _MinMaxHolder = Field(default_factory=_MinMaxHolder)
+    diff_cert: _MinMaxHolder = Field(default_factory=_MinMaxHolder)
+
+    @model_serializer()
+    def _serialize(self):
+        # flatten the structure
+        return {
+            "initial_value": self.initial_value,
+            "max_same_cert_name": self.same_cert.max[0],
+            "max_same_cert_value": self.same_cert.max[1],
+            "max_diff_cert_name": self.diff_cert.max[0],
+            "max_diff_cert_value": self.diff_cert.max[1],
+            "min_same_cert_name": self.same_cert.min[0],
+            "min_same_cert_value": self.same_cert.min[1],
+            "min_diff_cert_name": self.diff_cert.min[0],
+            "min_diff_cert_value": self.diff_cert.min[1],
+        }
+
+    @model_validator(mode="before")
+    @classmethod
+    def _load(cls, v):
+        return {
+            "initial_value": v["initial_value"],
+            "same_cert": {
+                "min": (v["min_same_cert_name"], v["min_same_cert_value"]),
+                "max": (v["max_same_cert_name"], v["max_same_cert_value"]),
+            },
+            "diff_cert": {
+                "min": (v["min_diff_cert_name"], v["min_diff_cert_value"]),
+                "max": (v["max_diff_cert_name"], v["max_diff_cert_value"]),
+            },
+        }
+
+    def update(self, same_cert, key: str, value: float):
+        if same_cert:
+            self.same_cert.update(key, value)
+        else:
+            self.diff_cert.update(key, value)
 
     def to_dict(self):
         # dirty way to convert to serializable for DB
         return json.loads(json.dumps(self))
 
 
-@dataclass
-class ComputedMetricsHolder:
-    metrics_summary: dict[str, ComputedMetricsSummary]
-    domain_details: dict[str, ComputedMetrics]
+x = _MinMaxHolder()
+x = ComputedMetricsSummary(initial_value=1)
 
-    def to_dict(self):
-        # dirty way to convert to serializable for DB
-        return json.loads(json.dumps(self))
+Heap = list
+METRIC_KEEP = 10
 
 
-def summarize_metrics(domain_ratios: dict[str, ComputedMetrics]) -> dict[str, ComputedMetricsSummary]:
-    # compute summary; for each metric find min/max for same/diff cert
-    summary = {}
-    ratio_names = [x[0] for x in ComputedMetrics.__dataclass_fields__.items() if x[1].type == float]
-    for ratio_name in ratio_names:
-        initial_value = None
-        if "initial" in domain_ratios:
-            initial_value = getattr(domain_ratios["initial"], ratio_name)
-        # ugly code, but it works :shrug:
-        min_same_cert_name = None
-        min_same_cert_value = None
-        min_diff_cert_name = None
-        min_diff_cert_value = None
-        max_same_cert_name = None
-        max_same_cert_value = None
-        max_diff_cert_name = None
-        max_diff_cert_value = None
-        for k, v in domain_ratios.items():
-            if k == "initial":
-                continue
-            ratio = getattr(v, ratio_name)
-            if v.same_cert:
-                if not min_same_cert_name or ratio < min_same_cert_value:
-                    min_same_cert_name = k
-                    min_same_cert_value = ratio
-                if not max_same_cert_name or ratio > max_same_cert_value:
-                    max_same_cert_name = k
-                    max_same_cert_value = ratio
+class _MetricsHolder(BaseModel):
+
+    details: dict[BodyId, Metrics] = Field(default_factory=dict)
+    metrics_sorted: dict[MetricName, Heap[tuple[MetricValue, BodyId]]] = Field(default_factory=dict, exclude=True)
+
+    @model_serializer()
+    def serialize(self):
+        return self.details
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _load(cls, v, handler, info):
+        self: _MetricsHolder = handler(v)
+        len_before = len(v)
+        for key, metrics in v.items():
+            self.add_metric(key, metrics)
+        assert len(self.details) == len_before
+        return self
+
+    def add_metric(self, key, metrics):
+        details_drop = set()
+        should_add_to_details = False
+
+        for metric_name, value in metrics.items():
+            if metric_name not in self.metrics_sorted:
+                self.metrics_sorted[metric_name] = Heap()
+
+            sorted_list = self.metrics_sorted[metric_name]
+            if len(sorted_list) < METRIC_KEEP:
+                should_add_to_details = True
+                heapq.heappush(sorted_list, (value, key))
             else:
-                if not min_diff_cert_name or ratio < min_diff_cert_value:
-                    min_diff_cert_name = k
-                    min_diff_cert_value = ratio
-                if not max_diff_cert_name or ratio > max_diff_cert_value:
-                    max_diff_cert_name = k
-                    max_diff_cert_value = ratio
-        summary[ratio_name] = ComputedMetricsSummary(
-            initial_value=initial_value,
-            min_same_cert_name=min_same_cert_name,
-            min_same_cert_value=min_same_cert_value,
-            min_diff_cert_name=min_diff_cert_name,
-            min_diff_cert_value=min_diff_cert_value,
-            max_same_cert_name=max_same_cert_name,
-            max_same_cert_value=max_same_cert_value,
-            max_diff_cert_name=max_diff_cert_name,
-            max_diff_cert_value=max_diff_cert_value,
-        )
-    return summary
+                # heap keeps the smallest value at first place
+                smallest_value, smallest_name = sorted_list[0]
+                if value > smallest_value:
+                    should_add_to_details = True
+                    details_drop.add(smallest_name)
+                    _val, _name = heapq.heappushpop(sorted_list, (value, key))
+                    assert _val == smallest_value
+                    assert _name == smallest_name
+
+        if should_add_to_details:
+            self.details[key] = metrics
+        for key in details_drop:
+            skip_remove = False
+            for lst in self.metrics_sorted.values():
+                for _, bid in lst:
+                    if bid == key:
+                        skip_remove = True
+                        break
+                if skip_remove:
+                    break
+            if not skip_remove:
+                # no other set contains this key
+                del self.details[key]
+
+
+def _test_metrics_holder():
+    # SELF TEST
+    global METRIC_KEEP
+    METRIC_KEEP = 2
+    holder = _MetricsHolder()
+    holder.add_metric("a", {"m1": 1, "m2": 1, "m3": 1})
+    holder.add_metric("b", {"m1": 9, "m2": 1, "m3": 1})
+    assert holder.model_dump().keys() == {"a", "b"}
+    holder.add_metric("c", {"m1": 0, "m2": 0, "m3": 0})
+    holder.add_metric("d", {"m1": 2, "m2": 2, "m3": 2})
+    assert holder.model_dump().keys() == {"b", "d"}
+    holder.add_metric("e", {"m1": 1, "m2": 9, "m3": 1})
+    assert holder.model_dump().keys() == {"b", "d", "e"}
+    holder.add_metric("f", {"m1": 10, "m2": 8, "m3": 1})
+    assert holder.model_dump().keys() == {"b", "d", "e", "f"}
+    holder.add_metric("g", {"m1": 42, "m2": 42, "m3": 42})
+    assert holder.model_dump().keys() == {"d", "e", "f", "g"}
+    holder.add_metric("h", {"m1": 42, "m2": 42, "m3": 42})
+    assert holder.model_dump().keys() == {"g", "h"}
+
+
+_test_metrics_holder()
+del _test_metrics_holder
+
+
+class ComputedMetricsHolder(BaseModel):
+    metrics_summary: dict[MetricName, ComputedMetricsSummary] = Field(default_factory=dict)
+    initial_details: Optional[Metrics]
+    same_cert_details: _MetricsHolder = Field(default_factory=_MetricsHolder)
+    diff_cert_details: _MetricsHolder = Field(default_factory=_MetricsHolder)
+
+    def add_metrics(self, same_cert, key: BodyId, metrics: Metrics):
+        if key == "initial":
+            for mname, mvalue in metrics.items():
+                self.metrics_summary[mname] = ComputedMetricsSummary(mvalue)
+            return
+
+        if same_cert:
+            self.same_cert_details.add_metric(key, metrics)
+        else:
+            self.diff_cert_details.add_metric(key, metrics)
+
+        # update summary
+        for mname, mvalue in metrics.items():
+            if mname not in self.metrics_summary:
+                initial_value = self.initial_details.get(mname, None) if self.initial_details else None
+                self.metrics_summary[mname] = ComputedMetricsSummary(initial_value=initial_value)
+            self.metrics_summary[mname].update(same_cert, key, mvalue)
+
+    def to_dict(self):
+        return self.model_dump()
 
 
 def extract_subjects(parsed_cert):
@@ -432,12 +532,14 @@ def compute_metrics(initial: Response, resumption: Response, domain_from: str, i
     if not resumption.resumed:
         return None
 
-    domain_ratios = {"initial": ComputedMetrics.from_response(True, resumption.body, initial.body)}
+    ret = ComputedMetricsHolder(initial_details=compute_single_metrics(resumption.body, initial.body))
+
     relevant_domains = set(
         get_domains_on_ip(resumption._ip)
         + extract_subjects(initial.parsed_certificate)
         # + get_domain_neighborhood(domain_from)
     )
+
     for neighbor_domain in relevant_domains:
         for neighbor_body, neighbor_cert, neighbor_id in get_body_cert_id_for_domain(neighbor_domain):
             if neighbor_id == initial_doc_id:
@@ -446,12 +548,13 @@ def compute_metrics(initial: Response, resumption: Response, domain_from: str, i
             if not neighbor_body:
                 continue
             key = f"{neighbor_domain}[{neighbor_id}]"
-            assert key not in domain_ratios
-            domain_ratios[key] = ComputedMetrics.from_response(
-                initial.certificate == neighbor_cert, resumption.body, neighbor_body
+            ret.add_metrics(
+                initial.certificate == neighbor_cert,
+                key,
+                compute_single_metrics_with_initial(initial.body, resumption.body, neighbor_body),
             )
 
-    return ComputedMetricsHolder(metrics_summary=summarize_metrics(domain_ratios), domain_details=domain_ratios)
+    return ret
 
 
 # endregion Metrics Dataclasses and Logic
@@ -647,33 +750,6 @@ def analyze_item_iter(result: AnalyzedZgrab2ResumptionResult, initial_doc_id):
             yield ResumptionClassification.not_applicable("exception occured"), None
 
 
-def compute_initial_metrics(result: AnalyzedZgrab2ResumptionResult, resumption_classifications_and_metrics):
-    id_to_domain = {}
-    ids = set()
-    for classification, metrcis_holder in resumption_classifications_and_metrics:
-        if metrcis_holder is not None:
-            for key in metrcis_holder.domain_details:
-                if "[" in key:
-                    domain, body_id = key.split("[", 1)
-                    body_id = body_id.rstrip("]")
-                    ids.add(body_id)
-                    id_to_domain[body_id] = domain
-
-    body_certs = dict(get_body_cert_for_ids(ids))
-
-    initial_metrics = {}
-    for id in ids:
-        domain = id_to_domain[id]
-        body, cert = body_certs[id]
-        key = f"{domain}[{id}]"
-        initial_metrics[key] = ComputedMetrics.from_response(
-            result.initial.certificate == cert, result.initial.body, body
-        )
-    if not initial_metrics:
-        return None
-    return ComputedMetricsHolder(metrics_summary=summarize_metrics(initial_metrics), domain_details=initial_metrics)
-
-
 def bson_length(doc):
     if isinstance(doc, dict):
         return len(bson.BSON.encode(doc))
@@ -696,14 +772,15 @@ def analyze_item(doc, insert_result: bool = True):
     update_set = {"_analyzed": True}
     initial_metrics = None
     if resumption_classifications_and_metrics:
-        initial_metrics = compute_initial_metrics(result, resumption_classifications_and_metrics)
+        # initial_metrics = compute_initial_metrics(result, resumption_classifications_and_metrics)
 
-        if initial_metrics is not None:
-            {"initial._metrics": initial_metrics.to_dict()}
+        # if initial_metrics is not None:
+        #     {"initial._metrics": initial_metrics.to_dict()}
         for i, (classification, metrics) in enumerate(resumption_classifications_and_metrics):
             update_set[f"redirect.{i}._classification"] = classification.to_dict()
             if metrics is not None:
                 update_set[f"redirect.{i}._metrics"] = metrics.to_dict()
+
     if insert_result:
         try:
             ScanContext.mongo_collection.update_one({"_id": doc_id}, {"$set": update_set}, upsert=False)
