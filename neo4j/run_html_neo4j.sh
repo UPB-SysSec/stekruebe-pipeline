@@ -7,14 +7,14 @@ cd "$(dirname $0)"
 # values from
 # docker run -it --rm neo4j:5.13.0 neo4j-admin server memory-recommendation --memory=16G
 # restart with
-# docker stop steckruebe-prefix-database; sleep 5; ./ticket-redirection/neo4j/run_neo4j.sh
+# docker stop steckruebe-graph-database; sleep 5; ./ticket-redirection/neo4j/run_neo4j.sh
 
 docker run \
 	-it \
-	--name steckruebe-prefix-database \
-	-v "$(pwd)"/neo4jdata:/data \
-	--env NEO4J_PLUGINS='["graph-data-science"]' \
+	--name steckruebe-html-database \
+	-v "$(pwd)"/htmlneo4jdata:/data \
 	--env NEO4J_AUTH='neo4j/IJj5fyYpeeWdvAXsxwuJuqlGQxZNDhLf' \
+	--env NEO4J_PLUGINS=\[\"apoc\"\] \
 	--env NEO4J_server_memory_heap_initial__size=5g \
 	--env NEO4J_server_memory_heap_max__size=5g \
 	--env NEO4J_server_memory_pagecache_size=7g \

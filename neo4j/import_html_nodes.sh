@@ -1,17 +1,20 @@
 #!/bin/sh -e
 cd "$(dirname "$0")"
 
+docker stop steckruebe-html-database || true
+
 docker run \
 	-it \
 	--rm \
-	--name steckruebe-import \
-	-v "$(pwd)"/neo4jdata:/data \
+	--name steckruebe-html-import \
+	-v "$(pwd)"/htmlneo4jdata:/data \
 	-v "$(pwd)"/import:/import \
 	neo4j:5.13.0 \
 neo4j-admin database import full \
-	--nodes /import/domains_header.csv,/import/domains.csv \
-	--nodes /import/ips_header.csv,/import/ips.csv \
-	--nodes /import/prefixes_header.csv,/import/prefixes.csv \
-	--relationships /import/relationships_header.csv,/import/relationships.csv \
+ 	--nodes /import/initial_html_header.csv,/import/initial_html.csv \
+	--nodes /import/resumption_html_header.csv,/import/resumption_html.csv \
+	--relationships /import/html_edges_header.csv,/import/html_edges.csv \
+	--skip-bad-relationships=true \
+	--bad-tolerance=25000 \
 	--overwrite-destination=true \
 	neo4j

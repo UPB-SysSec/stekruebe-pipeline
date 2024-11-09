@@ -1,4 +1,4 @@
-from neo4j import GraphDatabase as _neo4j_GraphDatabase
+from neo4j import GraphDatabase as _neo4j_GraphDatabase, Driver as _neo4j_Driver
 from pymongo import MongoClient as _MongoClient
 from pymongo.database import Database as _MongoDatabase
 from pymongo.collection import Collection as _MongoCollection
@@ -107,7 +107,7 @@ def connect_mongo(creds=..., url=..., verify_connectivity=True) -> _MongoClient:
     return mongo_driver
 
 
-def connect_neo4j(creds=..., verify_connectivity=True) -> _neo4j_GraphDatabase:
+def connect_neo4j(creds=..., verify_connectivity=True) -> _neo4j_Driver:
     if creds is ...:
         creds = credentials.neo4j_creds
     neo4j_driver = Neo4j("bolt://localhost:7687", auth=creds.as_tuple())
