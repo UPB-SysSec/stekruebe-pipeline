@@ -21,6 +21,7 @@ from typing import Optional, Union
 from urllib.parse import urlparse
 
 import bson
+import shutil
 import Levenshtein
 from utils.botp import BagOfTreePaths
 import utils.json_serialization as json
@@ -51,6 +52,10 @@ from utils.db import (
 from utils.misc import catch_exceptions
 from utils.result import Zgrab2ResumptionResult
 from utils.result import Connectable, ScanVersion, Zgrab2ResumptionResultStatus
+from pathlib import Path
+
+_NEO4J_PATH = Path(__file__).parent / "neo4j"
+_NEO4J_PATH_IMPORT = _NEO4J_PATH / "import"
 
 
 class ScanContext:
@@ -65,17 +70,13 @@ class ScanContext:
         mongodb = connect_mongo(verify_connectivity=verify_connectivity)
         database = mongodb["steckruebe"]
         if not mongo_collection_name:
-            mongo_collection_name = get_most_recent_collection_name(
-                database, "ticket_redirection_"
-            )
+            mongo_collection_name = get_most_recent_collection_name(database, "ticket_redirection_")
             logging.info(f"Using most recent collection: {mongo_collection_name}")
         if not mongo_collection_name:
             raise ValueError("Could not determine most recent collection")
         ScanContext.mongo_collection = database[mongo_collection_name]
         # resumption collection is used for post processing the original collection
-        ScanContext.resumption_collection = database[
-            f"{mongo_collection_name}_resumptions"
-        ]
+        ScanContext.resumption_collection = database[f"{mongo_collection_name}_resumptions"]
 
 
 class Response:
@@ -93,12 +94,8 @@ class Response:
             self.certificate = None
             self.parsed_certificate = None
         else:
-            self.certificate = self._handshake_log["server_certificates"][
-                "certificate"
-            ]["raw"]
-            self.parsed_certificate = self._handshake_log["server_certificates"][
-                "certificate"
-            ].get("parsed")
+            self.certificate = self._handshake_log["server_certificates"]["certificate"]["raw"]
+            self.parsed_certificate = self._handshake_log["server_certificates"]["certificate"].get("parsed")
         self.status_code = self._response.get("status_code", -1)
         self.body_sha256 = self._response.get("body_sha256", None)
         self.body = self._response.get("body", None)
@@ -115,9 +112,7 @@ class Response:
                 )
                 self.location = [self.location[0]]
             else:
-                logging.warning(
-                    f"Multiple distinct locations: {self.location} for {self._ip}"
-                )
+                logging.warning(f"Multiple distinct locations: {self.location} for {self._ip}")
 
     def __str__(self) -> str:
         sha_format = f"{self.body_sha256:.6s}" if self.body_sha256 else "None"
@@ -323,13 +318,15 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
 
 # region Bulkimport
 
+all_node_ids = set()
+
+
 @dataclass
 class HTMLNode:
     _FILENAME = ""
     _HEADER_FILENAME = ""
     # dummy writer
-    _FILE = open("/dev/null", "w")
-    _WRITER = csv.writer(_FILE, quoting=csv.QUOTE_NONE)
+    # FILE = open("/dev/null", "w")
 
     def __init__(self, doc_id, ip, domain, version, labels="HTML"):
         self.doc_id = doc_id
@@ -354,24 +351,19 @@ class HTMLNode:
             self.labels,
         )
 
-    def write(self):
-        try:
-            self._WRITER.writerow(self.row())
-        except Exception as e:
-            print(self.row())
-            raise e
-
     @classmethod
     def write_header(cls):
         with open(cls._HEADER_FILENAME, "w") as f:
             f.write(cls.header())
 
 
+initial_rows = []
+
+
 class InitialHTMLNode(HTMLNode):
-    _FILENAME = "neo4j/import/initial_html.csv"
-    _HEADER_FILENAME = "neo4j/import/initial_html_header.csv"
-    _FILE = open(_FILENAME, "w")
-    _WRITER = csv.writer(_FILE, quoting=csv.QUOTE_NONE)
+    _FILENAME = _NEO4J_PATH_IMPORT / "initial_html.csv"
+    _HEADER_FILENAME = _NEO4J_PATH_IMPORT / "initial_html_header.csv"
+    rows = []
 
     def __init__(self, doc_id, ip, domain, version):
         super().__init__(doc_id, ip, domain, version, labels="HTML;INITIAL_HTML")
@@ -379,16 +371,28 @@ class InitialHTMLNode(HTMLNode):
     def header():
         return ":ID(Initial-ID),doc_id,ip,domain,version,:LABEL"
 
+    def write(self):
+        all_node_ids.add(self.id())
+        initial_rows.append(self.row())
+        # try:
+        #     self.initial_html_writer.writerow(self.row())
+        # except Exception as e:
+        #     print(self.row())
+        #     raise e
+
+
+resumption_rows = []
+
+
 class ResumptionHTMLNode(HTMLNode):
-    _FILENAME = "neo4j/import/resumption_html.csv"
-    _HEADER_FILENAME = "neo4j/import/resumption_html_header.csv"
-    _FILE = open(_FILENAME, "w")
-    _WRITER = csv.writer(_FILE, quoting=csv.QUOTE_NONE)
+    _FILENAME = _NEO4J_PATH_IMPORT / "resumption_html.csv"
+    _HEADER_FILENAME = _NEO4J_PATH_IMPORT / "resumption_html_header.csv"
+    # FILE = open(_FILENAME, "w")
 
     def __init__(self, doc_id, ip, domain, version, redirect_index):
         super().__init__(doc_id, ip, domain, version, labels="HTML;REDIRECT_HTML")
         self.redirect_index = redirect_index
-    
+
     def id(self):
         return hash((self.doc_id, self.redirect_index, self.ip, self.domain, self.version, self.labels))
 
@@ -406,49 +410,63 @@ class ResumptionHTMLNode(HTMLNode):
     def header():
         return ":ID(Resumption-ID),doc_id,redirect_index,ip,domain,version,:LABEL"
 
+    # def write(self):
+    #     all_node_ids.add(self.id())
+    #     resumption_rows.append(self.row())
+    # try:
+    #     self.resumption_html_writer.writerow(self.row())
+    # except Exception as e:
+    #     print(self.row())
+    #     raise e
+
+
+edge_rows = []
+
 
 class Relationship:
-    _FILENAME = "neo4j/import/html_edges.csv"
-    _HEADER_FILENAME = "neo4j/import/html_edges_header.csv"
-    _FILE = open(_FILENAME, "w")
-    _WRITER = csv.writer(_FILE, quoting=csv.QUOTE_NONNUMERIC)
+    _FILENAME = _NEO4J_PATH_IMPORT / "html_edges.csv"
+    _HEADER_FILENAME = _NEO4J_PATH_IMPORT / "html_edges_header.csv"
 
-    def __init__(self, initial_id, resumption_id, classification, reason):
-        self.initial_id = initial_id
-        self.resumption_id = resumption_id
+    def __init__(self, initial: InitialHTMLNode, resumption: ResumptionHTMLNode, classification, reason):
+        self.initial = initial
+        self.resumption = resumption
         self.classification = classification
         # escape , because it is used as delimiter
         self.reason = reason.replace(",", ";")
+        # self.edge_writer = edge_writer
 
     def header():
         return ":START_ID(Initial-ID),:END_ID(Resumption-ID),:TYPE,classification,reason"
 
-    def id(self):
-        return hash((self.initial_id, self.resumption_id))
-
     def row(self):
         # classification is a string and needs to be quoted for the import tool
-        return (self.initial_id, self.resumption_id, "RESUMED_AT", f'{self.classification}', f'{self.reason}')
+        # return (self.initial_id, self.resumption_id, "RESUMED_AT", f'{self.classification}', f'{self.reason}')
+        return (self.initial.id(), self.resumption.id(), "RESUMED_AT", self.classification, self.reason)
 
     def write(self):
-        try:
-            self._WRITER.writerow(self.row())
-        except Exception as e:
-            print(self.row())
-            raise e
+        assert self.initial.id() in all_node_ids, f"{self.initial.id()} not in {all_node_ids}"
+        assert self.resumption.id() in all_node_ids, f"{self.resumption.id()} not in {all_node_ids}"
+        edge_rows.append(self.row())
+        # try:
+        #     self.edge_writer.writerow(self.row())
+        # except Exception as e:
+        #     print(self.row())
+        #     raise e
 
     @classmethod
     def write_header(cls):
         with open(cls._HEADER_FILENAME, "w") as f:
             f.write(cls.header())
 
-def classify(doc, insert_result: bool = True):
+
+def classify(doc, rows, insert_result: bool = True):
     doc_id = doc["_id"]
     del doc["_id"]
     if "_analyzed" in doc:
         del doc["_analyzed"]
     if "_analysis_errored" in doc:
         del doc["_analysis_errored"]
+    initial_rows, resumption_rows, edge_rows = rows
     result = AnalyzedZgrab2ResumptionResult(**doc)
     # insert all successful initial resumption pairs into the resumption collection and assign a unique id
     initial = InitialHTMLNode(
@@ -457,7 +475,7 @@ def classify(doc, insert_result: bool = True):
         domain=result.domain_from,
         version="TLSv1.2" if result.version is ScanVersion.TLS1_2 else "TLSv1.3",
     )
-    initial.write()
+    initial_rows.append(initial.row())
     for i, redirect in enumerate(result.redirect):
         classification = classify_resumption(result.initial, redirect, result.domain_from)
         # resumption_doc = {
@@ -474,17 +492,25 @@ def classify(doc, insert_result: bool = True):
             redirect_index=i,
             ip=redirect._ip,
             domain=result.domain_from,
-            version=(
-                "TLSv1.2" if result.version is ScanVersion.TLS1_2 else "TLSv1.3"
-            ),
+            version=("TLSv1.2" if result.version is ScanVersion.TLS1_2 else "TLSv1.3"),
         )
-        resumption.write()
+        # resumption_writer.writerow(resumption.row())
+        resumption_rows.append(resumption.row())
         edge = Relationship(
-            initial_id=initial.id(), resumption_id=resumption.id(), classification=classification.classification.name, reason=classification.reason
+            initial=initial,
+            resumption=resumption,
+            classification=classification.classification.name,
+            reason=classification.reason,
         )
-        edge.write()
+        # edge_writer.writerow(edge.row())
+        edge_rows.append(edge.row())
+
+
+# endregion Bulkimport
 
 # region Indexing
+
+
 def create_indices():
     # indices on ip and domain
     index_query = """
@@ -495,55 +521,77 @@ def create_indices():
         CREATE INDEX node_domain_index IF NOT EXISTS FOR (n:HTML) ON (n.domain);
         """
     ScanContext.neo4j.execute_query(index_query)
-        # create index on edge classification
+    # create index on edge classification
     index_query = """
         CREATE INDEX edge_classification_index IF NOT EXISTS FOR ()-[r:RESUMED_AT]->() ON (r.classification);
     """
     ScanContext.neo4j.execute_query(index_query)
     # create index on edge classification
     index_query = """
-        CREATE INDEX edge_classification_index IF NOT EXISTS FOR ()-[r:RESUMED_AT]->() ON (r.classification);
+        CREATE INDEX edge_classification_index IF NOT EXISTS FOR ()-[r:RESUMED_AT]->() ON (r.reason);
     """
     ScanContext.neo4j.execute_query(index_query)
+
+
 # endregion Indexing
 
 # region Similarity Edges
+
+
 def build_similarity_edges():
-    # create TARGET edge for all initial -> resumption
+    # create WHITE edge for all initial -> resumption
     white_query = """
         CALL apoc.periodic.iterate(
-        "MATCH (initial:INITIAL_HTML)-[:RESUMED_AT]->(redirect:REDIRECT_HTML)
+        "MATCH (initial:INITIAL_HTML)-[:RESUMED_AT {classification: 'UNSAFE'}]->(redirect:REDIRECT_HTML)
         RETURN initial, redirect",
-        "MERGE (initial)-[:TARGET]->(redirect)",
+        "MERGE (initial)-[:WHITE]->(redirect)",
         {batchSize:10000, parallel:true})
         """
-        # MATCH (initial:INITIAL_HTML)-[:RESUMED_AT]->(redirect:REDIRECT_HTML)
-        # MERGE (initial)-[:WHITE]->(redirect)
-        # """
+    # MATCH (initial:INITIAL_HTML)-[:RESUMED_AT]->(redirect:REDIRECT_HTML)
+    # MERGE (initial)-[:WHITE]->(redirect)
+    # """
     # execute query
     _, summary, _ = ScanContext.neo4j.execute_query(white_query)
     logging.info(f"Created {summary.counters.relationships_created=} new white relationships")
-    #print execution time
+    # print execution time
     logging.info(f"Execution time: {summary.result_available_after} ms")
 
-    # create BLACK edge for each resumption to all other resumptions with same ip
+    # # given an unsafe edge, create a black edge from the resumption to all initials with the same domain as the initial or domains hosted on same ip as initial
     black_query = """
         CALL apoc.periodic.iterate(
-        "MATCH (redirect:REDIRECT_HTML)
-        MATCH (redirect2:REDIRECT_HTML)
-        WHERE redirect<>redirect2 AND redirect.ip=redirect2.ip
-        RETURN redirect, redirect2",
-        "MERGE (redirect)-[:BLACK]->(redirect2)",
-        {batchSize:10000, parallel:true})
-        """
-        # MATCH (redirect:HTML:REDIRECT_HTML)
-        # MATCH (redirect2:HTML:REDIRECT_HTML)
-        # WHERE redirect<>redirect2 AND redirect.ip=redirect2.ip
-        # MERGE (redirect)-[:BLACK]->(redirect2)
-        # """
+        "MATCH (initial:INITIAL_HTML)-[:RESUMED_AT {classification: 'UNSAFE'}]->(redirect:REDIRECT_HTML)
+         MATCH (initial2:INITIAL_HTML {domain: initial.domain})
+         WHERE initial2<>initial
+         MATCH (initial3:INITIAL_HTML {ip: redirect.ip})
+         WHERE initial3<>initial
+         MATCH (initial4:INITIAL_HTML {domain: initial3.domain})
+         RETURN redirect, initial2, initial4",
+        "MERGE (initial2)<-[:BLACK]-(redirect)-[:BLACK]->(initial4)",
+        {batchSize:25, parallel:true})
+    """
+    #     # "MERGE (redirect)-[:BLACK]->(initial2)
     _, summary, _ = ScanContext.neo4j.execute_query(black_query)
     logging.info(f"Created {summary.counters.relationships_created=} new black relationships")
     logging.info(f"Execution time: {summary.result_available_after} ms")
+    # unsafe_resumption_query = """
+    #     MATCH (initial:INITIAL_HTML)-[:RESUMED_AT {classification: 'UNSAFE'}]->(redirect:REDIRECT_HTML)
+    #     RETURN initial, redirect
+    # """
+    # records, summary, keys = ScanContext.neo4j.execute_query(unsafe_resumption_query)
+    # for unsafe_resumption in tqdm(records):
+    #     initial, initial_id, redirect = unsafe_resumption.data()
+    #     print(initial, redirect)
+    #     # domain = initial["domain"]
+    #     # create black edge for each initial with same domain as initial
+    #     black_query = f"""
+    #         MATCH (initial:INITIAL_HTML {{domain: '{domain}'}})
+    #         RETURN initial
+    #         MATCH (redirect:REDIRECT_HTML {{ip: '{ip}'}})
+    #         MERGE (initial)-[:BLACK]->(redirect)
+    #     """
+    #     _, summary, _ = ScanContext.neo4j.execute_query(black_query)
+    #     logging.info(f"Created {summary.counters.relationships_created=} new black relationships")
+    #     logging.info(f"Execution time: {summary.result_available_after} ms")
 
     # create BLUE edge for each initial to all initial with same domain
     # blue_query = """
@@ -554,12 +602,11 @@ def build_similarity_edges():
     # """
     blue_query = """
         CALL apoc.periodic.iterate(
-        "MATCH (initial:INITIAL_HTML)
-        MATCH (initial2:INITIAL_HTML)
-        WHERE initial<>initial2 AND initial.domain=initial2.domain
+        "MATCH (initial:INITIAL_HTML)-[:RESUMED_AT {classification: 'UNSAFE'}]->(redirect:REDIRECT_HTML)
+        MATCH (initial2:INITIAL_HTML {domain: initial.domain})
         RETURN initial, initial2",
         "MERGE (initial)-[:BLUE]->(initial2)",
-        {batchSize:10000, parallel:true})
+        {batchSize:1000, parallel:true})
         """
     _, summary, _ = ScanContext.neo4j.execute_query(blue_query)
     logging.info(f"Created {summary.counters.relationships_created=} new blue relationships")
@@ -578,7 +625,7 @@ def build_similarity_edges():
         WHERE initial2<>initial3
         RETURN initial2, initial3",
         "MERGE (initial2)-[:PURPLE]->(initial3)",
-        {batchSize:10000, parallel:true})
+        {batchSize:1000, parallel:true})
         """
     _, summary, _ = ScanContext.neo4j.execute_query(purple_query)
     logging.info(f"Created {summary.counters.relationships_created=} new purple relationships")
@@ -593,16 +640,17 @@ def build_similarity_edges():
     green_query = """
         CALL apoc.periodic.iterate(
         "MATCH (initial:INITIAL_HTML)-[:RESUMED_AT]->(redirect:REDIRECT_HTML)
-        MATCH (redirect:REDIRECT_HTML)-[:BLUE|PURPLE|BLACK]-(redirect2:REDIRECT_HTML)
-        WHERE redirect<>redirect2
-        RETURN initial, redirect2",
-        "MERGE (initial)-[:GREEN]->(redirect2)",
-        {batchSize:10000, parallel:true})
+         MATCH (initial2:INITIAL_HTML {ip: redirect.ip})
+         WHERE initial2<>initial
+         MATCH (initial3:INITIAL_HTML {domain: initial2.domain})
+        RETURN initial, initial3",
+        "MERGE (initial)-[:GREEN]->(initial3)",
+        {batchSize:1000, parallel:true})
         """
     _, summary, _ = ScanContext.neo4j.execute_query(green_query)
     logging.info(f"Created {summary.counters.relationships_created=} new green relationships")
 
-     # create YELLOW edge for initial -> resumption for all with same domain as initial to all neighbors of resumption
+    # create YELLOW edge for initial -> resumption for all with same domain as initial to all neighbors of resumption
     # yellow_query = """
     #     MATCH (initial:HTML:INITIAL_HTML)-[:RESUMED_AT]->(redirect:HTML:REDIRECT_HTML)
     #     MATCH (initial:HTML:INITIAL_HTML)-[:BLUE]-(initial2:HTML:INITIAL_HTML)
@@ -616,10 +664,10 @@ def build_similarity_edges():
         MATCH (redirect:REDIRECT_HTML)-[:BLUE|PURPLE|BLACK|GREEN]-(redirect2:REDIRECT_HTML)
         RETURN initial2, redirect2",
         "MERGE (initial2)-[:YELLOW]->(redirect2)",
-        {batchSize:10000, parallel:true})
+        {batchSize:1000, parallel:true})
         """
     _, summary, _ = ScanContext.neo4j.execute_query(yellow_query)
-    print(f"Created {summary.counters.relationships_created=} new yellow relationships")
+    logging.info(f"Created {summary.counters.relationships_created=} new yellow relationships")
 
     # deduplicate all relationships
     # deduplicate_query = """
@@ -630,57 +678,105 @@ def build_similarity_edges():
     # """
 
 
-def analyze_collection(collection_filter=None):
-    # ""index for analyzed flag")
-    # ScanContext.mongo_collection.create_indexes(
-    #     [
-    #         IndexModel("_analyzed"),
-    #         IndexModel([("status", 1), ("_analyzed", 1)]),
-    #     ]
-    # )
+# endregion Similarity Edges
+
+
+def prepare_bulk_import_files(collection_filter=None, LIMIT=None):
+    CACHE_KEY = {
+        "collection_name": ScanContext.mongo_collection.full_name,
+        "collection_filter": collection_filter,
+        "LIMIT": LIMIT,
+    }
+    CACHE_FILE = _NEO4J_PATH_IMPORT / "cache_key.json"
+
+    try:
+        with CACHE_FILE.open("r") as f:
+            old_cache_key = json.load(f)
+    except FileNotFoundError:
+        old_cache_key = None
+
+    if old_cache_key == CACHE_KEY:
+        logging.info("Cache key matches, skipping bulk import preparation")
+        return
+
     if not collection_filter:
-        collection_filter = { "status": "SUCCESS" }
+        collection_filter = {"status": "SUCCESS"}
 
-    _COUNT = ScanContext.mongo_collection.count_documents(collection_filter)
-    db_items = ScanContext.mongo_collection.find(collection_filter)
+    if not LIMIT:
+        _COUNT = ScanContext.mongo_collection.count_documents(collection_filter)
+        LIMIT = _COUNT
+    else:
+        _COUNT = LIMIT
 
-    # logging.info("[1] Writing bulk import headers")
-    # InitialHTMLNode.write_header()
-    # ResumptionHTMLNode.write_header()
-    # Relationship.write_header()
-    # logging.info("[2] Starting classification and bulk import csv preparation")
-    # with ProcessPool() as pool:
-    #     for x in tqdm(pool.imap_unordered(classify, db_items), total=_COUNT, mininterval=5, file=sys.stdout):
-    #         pass
-    # logging.info("[3] Finishing bulk import preparation")
-    # # we manage the file handles ourselves, so we need to close them
-    # InitialHTMLNode._FILE.flush()
-    # InitialHTMLNode._FILE.close()
-    # ResumptionHTMLNode._FILE.flush()
-    # ResumptionHTMLNode._FILE.close()
-    # Relationship._FILE.flush()
-    # Relationship._FILE.close()
-    # logging.info("[4] Bulk import")
-    # subprocess.call("./neo4j/import_html_nodes.sh", shell=True)
-    # logging.info("[5] Restarting Neo4J")
-    # subprocess.call("./neo4j/run_html_neo4j.sh", shell=True)
-    # time.sleep(30)
+    db_items = ScanContext.mongo_collection.find(collection_filter, limit=LIMIT)
+
+    logging.info("[1] Writing bulk import headers")
+    InitialHTMLNode.write_header()
+    ResumptionHTMLNode.write_header()
+    Relationship.write_header()
+    logging.info("[2] Starting classification and bulk import csv preparation")
+    initial_rows = []
+    resumption_rows = []
+    edge_rows = []
+    rows = (initial_rows, resumption_rows, edge_rows)
+    with ProcessPool() as pool:
+        for doc in tqdm(db_items, total=_COUNT, mininterval=5, file=sys.stdout):
+            classify(doc, rows)
+    with open(InitialHTMLNode._FILENAME, "w") as InitialHTMLNode.FILE, open(
+        ResumptionHTMLNode._FILENAME, "w"
+    ) as ResumptionHTMLNode.FILE, open(Relationship._FILENAME, "w") as Relationship.FILE:
+        initial_html_writer = csv.writer(InitialHTMLNode.FILE, quoting=csv.QUOTE_NONE)
+        resumption_html_writer = csv.writer(ResumptionHTMLNode.FILE, quoting=csv.QUOTE_NONE)
+        edge_writer = csv.writer(Relationship.FILE, quoting=csv.QUOTE_NONNUMERIC)
+        for row in initial_rows:
+            initial_html_writer.writerow(row)
+        for row in resumption_rows:
+            resumption_html_writer.writerow(row)
+        for row in edge_rows:
+            edge_writer.writerow(row)
+    logging.info("[3] Finishing bulk import preparation")
+    # #back up the files
+    # shutil.copy("neo4j/import/initial_html.csv", "neo4j/import/initial_html.csv.old")
+    # shutil.copy("neo4j/import/resumption_html.csv", "neo4j/import/resumption_html.csv.old")
+    # shutil.copy("neo4j/import/html_edges.csv", "neo4j/import/html_edges.csv.old")
+
+    with CACHE_FILE.open("w") as f:
+        json.dump(CACHE_KEY, f)
+
+
+def do_bulk_import():
+    logging.info("[4] Bulk import")
+    subprocess.call("./neo4j/import_html_nodes.sh", shell=True)
+    logging.info("[5] Restarting Neo4J")
+    subprocess.call("./neo4j/run_html_neo4j.sh", shell=True)
+    logging.info("[5] Waiting for neo4j to run")
+    time.sleep(30)  # wait for neo4j to be ready
+
+
+def build_edges():
     ScanContext.neo4j = connect_neo4j(verify_connectivity=True)
-    logging.info("[6] Building indices")
+    logging.info("[6] Connected to Neo4J")
+    logging.info("[7] Building indices")
     create_indices()
-    logging.info("[7] Building similarity edges")
+    logging.info("[8] Building similarity edges")
     build_similarity_edges()
 
 
-def main(collection_name=None, collection_filter=None):
+def main(collection_name=None, collection_filter=None, LIMIT=None):
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     ScanContext.initialize(mongo_collection_name=collection_name)
     logging.info(f"Analyzing collection {ScanContext.mongo_collection.full_name}")
-    analyze_collection(collection_filter=collection_filter)
+
+    prepare_bulk_import_files(collection_filter=collection_filter, LIMIT=LIMIT)
+    do_bulk_import()
+    time.sleep(30)
+    build_edges()
 
 
-# main("test")
-main("ticket_redirection_2024-08-19_19:28")
+if __name__ == "__main__":
+    # main("test")
+    # main("ticket_redirection_2024-08-19_19:28", LIMIT=3_000_000)
+    main("ticket_redirection_2024-08-19_19:28")

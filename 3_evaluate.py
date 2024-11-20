@@ -1,5 +1,7 @@
+from collections import Counter
 import datetime
 import functools
+import heapq
 import itertools
 import logging
 import os
@@ -16,17 +18,19 @@ from urllib.parse import urlparse
 
 import bson
 import Levenshtein
+from utils.botp import BagOfTreePaths
 import utils.json_serialization as json
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, XMLParsedAsHTMLWarning
 from bson import ObjectId
 from neo4j import GraphDatabase
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_serializer, model_validator
 from pymongo import IndexModel
 from pymongo.collection import Collection
 from pymongo.errors import DocumentTooLarge, _OperationCancelled
 from utils.credentials import mongodb_creds, neo4j_creds
 from utils.db import MongoCollection, MongoDB, Neo4j, connect_mongo, connect_neo4j, get_most_recent_collection_name
-from utils.result import Zgrab2ResumptionResult
 from utils.misc import catch_exceptions
+from utils.result import Zgrab2ResumptionResult
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
@@ -74,6 +78,8 @@ class Response:
         self.body_len = self._response.get("body_len", None)
         self.content_title = self._response.get("content_title", None)
         self.content_length = self._response.get("content_length", None)
+        self.body_boxp = self._response.get("body_boxp", None)
+        self.body_botp = self._response.get("body_botp", None)
         self.location = self._response.get("headers", {}).get("location", [])
         if len(self.location) > 1:
             if len(set(self.location)) == 1:
@@ -227,6 +233,13 @@ def levenshtein_header_similarity(a, b):
     head_a = extract_head(a)
     head_b = extract_head(b)
     return levenshtein_ratio(head_a, head_b)
+
+
+@catch_exceptions
+def bag_of_paths_similarity(a, b):
+    bag1 = BagOfTreePaths(a)
+    bag2 = BagOfTreePaths(b)
+    return bag1.similarity(bag2)
 
 
 # endregion Actual Metrics
@@ -561,11 +574,11 @@ def compute_metrics(initial: Response, resumption: Response, domain_from: str, i
 
 # region Classification
 
-
 class ResumptionClassificationType(Enum):
     NOT_APPLICABLE = 0
     SAFE = 1
     UNSAFE = 2
+    LOOK_AT_METRICS = 3
 
     @staticmethod
     def from_bool_is_safe(is_safe):
@@ -609,6 +622,10 @@ class ResumptionClassification:
     @staticmethod
     def not_applicable(reason, a=None, b=None):
         return ResumptionClassification(ResumptionClassificationType.NOT_APPLICABLE, reason, a, b)
+
+    @staticmethod
+    def look_at_metrics():
+        return ResumptionClassification(ResumptionClassificationType.LOOK_AT_METRICS, "need to classify using metrics")
 
     @staticmethod
     def unsafe(reason, a=None, b=None):
@@ -729,7 +746,7 @@ def classify_resumption(initial: Response, resumption: Response, domain_from: st
     if initial.body_sha256 is not None and initial.body_sha256 == resumption.body_sha256:
         # same content
         return ResumptionClassification.safe("body sha256")
-    return ResumptionClassification.not_applicable("No easy way out -> metrics")
+    return ResumptionClassification.look_at_metrics()
 
 
 # endregion Classification
@@ -747,6 +764,7 @@ def analyze_item_iter(result: AnalyzedZgrab2ResumptionResult, initial_doc_id):
             logging.exception(
                 f"Error in classify_resumption ({result.domain_from}, {result.initial._ip} -> {redirected._ip}): {e}"
             )
+            raise
             yield ResumptionClassification.not_applicable("exception occured"), None
 
 
@@ -881,10 +899,10 @@ def cleanup_db():
     logging.info(f"Cleaned up {docs_cleant_up} documents, removed {fields_removed} fields")
 
 
-def test():
+def test(mongo_collection_name=None):
     from tqdm import tqdm
 
-    ScanContext.initialize()
+    ScanContext.initialize(mongo_collection_name=mongo_collection_name)
     collection_filter = {"redirect.data.http.result.response.status_code": 200}
     query_limit = 1000
     db_items = ScanContext.mongo_collection.find(collection_filter, limit=query_limit)
@@ -912,5 +930,5 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)-8s | %(process)d %(processName)s - %(name)s.%(funcName)s: %(message)s",
     )
     logging.getLogger("neo4j").setLevel(logging.CRITICAL)
-    main()
-    # test()
+    # main()
+    test("test")

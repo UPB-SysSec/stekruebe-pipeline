@@ -15,6 +15,6 @@ neo4j-admin database import full \
 	--nodes /import/resumption_html_header.csv,/import/resumption_html.csv \
 	--relationships /import/html_edges_header.csv,/import/html_edges.csv \
 	--skip-bad-relationships=true \
-	--bad-tolerance=25000 \
+	--bad-tolerance=0 \
 	--overwrite-destination=true \
 	neo4j

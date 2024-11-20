@@ -19,6 +19,7 @@ import inspect
 import traceback
 from utils import JsonFilter
 from itertools import product
+from utils.botp import BagOfTreePaths, BagOfXPaths
 from utils.credentials import mongodb_creds, neo4j_creds
 from utils import json_serialization as json
 from utils.result import Connectable, Zgrab2ResumptionResult, ScanVersion, Zgrab2ResumptionResultStatus
@@ -168,7 +169,6 @@ class _Stats:
 
         return ret
 
-
 STATS = _Stats()
 STATS_INTERVAL = 60
 
@@ -292,6 +292,8 @@ ZGRAB2_FILTER = JsonFilter(
     "data.http.result.*",
     "!data.http.result.response.body",
     "!data.http.result.response.body_len",
+    "!data.http.result.response.body_botp",
+    "!data.http.result.response.body_boxp",
     "!data.http.result.response.status_code",
     "!data.http.result.response.status_line",
     "!data.http.result.response.headers",
@@ -301,7 +303,6 @@ ZGRAB2_FILTER = JsonFilter(
     "!data.http.result.response.request.tls_log",
     "*.handshake_log.server_certificates.chain.parsed",
 )
-
 
 class Zgrab2Scanner(Scanner):
     def build_command(
@@ -396,6 +397,8 @@ class Zgrab2Scanner(Scanner):
             # if we keep the body for debugging, we truncate it a bit
             result["data"]["http"]["result"]["response"]["body_len"] = len(body)
             result["data"]["http"]["result"]["response"]["body"] = body[:10_000]
+            result["data"]["http"]["result"]["response"]["body_botp"] = BagOfTreePaths(body).paths
+            result["data"]["http"]["result"]["response"]["body_boxp"] = BagOfXPaths(body).paths
         except KeyError:
             pass
         return ZGRAB2_FILTER(result)
@@ -494,6 +497,7 @@ class IPType(Enum):
     V6 = "IPV6"
 
 
+# TODO: maybe replace rand() with something reproducible
 _BASE_QUERY = """
 CALL {{
     MATCH (d1:DOMAIN {{domain: $domain}})--(ip1:IP {{ip: $ip}})--(p:PREFIX)--(ip2:{ip_target_type}), (d1)--(p)

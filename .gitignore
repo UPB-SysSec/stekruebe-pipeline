@@ -12,3 +12,7 @@ __pycache__
 trie.pickle
 .venv/
 .idea/
+
+neo4jdata/
+htmlneo4jdata/
+neo4jdata.bak/
