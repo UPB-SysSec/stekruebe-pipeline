@@ -126,7 +126,12 @@ class Edge:
 # for a useful progress bar
 print("[1] Generating nodes and edges")
 with open("../out/7_merged_zgrab_all.json") as f:
-    for i, ln in enumerate(tqdm(f, total=NUM_LINES)):
+    f.seek(0, 2)
+    file_length = f.tell()
+    f.seek(0)
+    progress = tqdm(total=file_length, unit="B", unit_scale=True)
+    while ln := f.readline():
+        progress.update(len(ln))
         item = json.loads(ln)
 
         ip_node = IPNode(item["ip"])

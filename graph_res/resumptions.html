@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+
+<head>
+    <style>
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+        }
+
+        thead {
+            background-color: #eff;
+            position: sticky;
+            top: 0;
+        }
+
+        th,
+        td {
+            border: 1px solid black;
+            padding: .4em;
+        }
+
+        tr:nth-child(even) {
+            background-color: #eee;
+        }
+
+        .similarity {
+            text-align: right;
+        }
+
+        .layout-row {
+            height: 50%;
+            max-height: 50%;
+            overflow: auto;
+        }
+
+        #resumptions_table {
+            border-collapse: collapse;
+        }
+
+        #row-details {
+            border-top: 2px solid rgb(13, 102, 167);
+            display: flex;
+            background: white;
+        }
+
+        #row-details>div {
+            height: 100%;
+            flex: 1;
+            overflow: scroll;
+            border: 1px solid black;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="layout-row">
+        <form id="loginform">
+            Password: <input type="password" name="password" id="password">
+            <input type="submit" value="Login">
+            <i id="loginfeedback"></i>
+        </form>
+
+        <table id="resumptions_table">
+            <thead>
+                <tr>
+                    <th>Edge ID</th>
+                    <th>Domain</th>
+                    <th>I: From IP</th>
+                    <th>(I-R) Similarity</th>
+                    <th>R: To IP</th>
+                    <th>(R-b): Similarity</th>
+                    <th>b: Determined Domain</th>
+                    <th>#R >0.9</th>
+                    <th>#I >0.9</th>
+                </tr>
+            </thead>
+        </table>
+    </div>
+
+    <div class="layout-row">
+        <div id="row-details">
+            <div id="row-info"></div>
+            <div id="row-body-I"></div>
+            <div id="row-body-R"></div>
+            <div id="row-body-b"></div>
+        </div>
+    </div>
+
+    <script src="./common.js"></script>
+    <script src="./resumptions.js"></script>
+</body>

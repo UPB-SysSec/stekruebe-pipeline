@@ -27,7 +27,7 @@ date "+%s: %c"
 cat out/7_merged_zgrab.r*.json > out/7_merged_zgrab_all.json
 
 cd neo4j
-docker stop steckruebe-graph-database || true
+docker stop steckruebe-prefix-database || true
 
 if ! [ -d "import" ]; then
     mkdir import
@@ -35,12 +35,12 @@ fi
 
 echo "[#] Preparing for Neo4j"
 date "+%s: %c"
-python3 generate_bulk_csv.py
+python3 generate_prefix_bulk_csv.py
 date "+%s: %c"
 echo "[ ] Importing into Neo4j"
-./import_csv.sh
+./run_prefix_neo4j.sh
 echo "[ ] Starting Neo4j"
-./run_neo4j.sh
+./run_prefix_neo4j.sh
 sleep 30
 echo "[ ] Generating Clusters"
 ./generate_wcc.sh
@@ -51,8 +51,21 @@ date "+%s: %c"
 python3 2_perform_redirection.py
 date "+%s: %c"
 
-echo "Running Evaluation"
+docker stop steckruebe-prefix-database
+
+echo "[ ] Transfering scan results to neo4j"
 date "+%s: %c"
-# python3 3_evaluate.py
-./3_evaluate_wrapper.sh
+python3 3_transfer_redirection_results_to_neo4j.py
 date "+%s: %c"
+
+echo "[ ] Creating SIM edges"
+date "+%s: %c"
+python3 4_create_sim_edges.py
+date "+%s: %c"
+
+echo "[ ] Computing SIM edge values"
+date "+%s: %c"
+./5__wrapper.sh
+date "+%s: %c"
+
+echo "[#] DONE"

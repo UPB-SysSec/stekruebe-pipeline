@@ -18,6 +18,7 @@ class _ProcessLocal(ABC):
         self.__init_args = args
         self.__init_kwargs = kwargs
         self.__pid = None
+        self.__prev_instance = None  # avoid garbage collection of instance pre-fork; one instance is sufficient for us
         pass
 
     @property
@@ -29,7 +30,10 @@ class _ProcessLocal(ABC):
         if self.__instance_INTERNAL is None or not self._is_same_pid:
             self.__pid = os.getpid()
             logging.debug(f"Creating new instance (Class: {self.__class__.__name__})")
+            prev_instance = self.__instance_INTERNAL
             self.__instance_INTERNAL = self._create_instance(*self.__init_args, **self.__init_kwargs)
+            if prev_instance is not None:
+                self.__prev_instance = prev_instance
         return self.__instance_INTERNAL
 
     @property
@@ -50,6 +54,7 @@ class Neo4j(_ProcessLocal):
         return _neo4j_GraphDatabase.driver(*args, **kwargs)
 
     def __close(self):
+        logging.debug(f"Closing Neo4j driver")
         if self._was_initialized:
             self._instance.close()
 

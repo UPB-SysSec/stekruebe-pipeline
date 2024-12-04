@@ -1,11 +1,15 @@
 #!/bin/sh
+cd "$(dirname "$0")"
+
+_CERT_PATH="/etc/ssl/private/$(hostname).cs.uni-paderborn.de"
+
 docker run \
     --name nginx_graph \
-    -v /data/cdn_ticket/graph:/usr/share/nginx/html:ro \
-    -v /data/cdn_ticket/webserver/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
-    -v /etc/ssl/private/snhebrok-eval.cs.uni-paderborn.de.key:/key.pem:ro \
-    -v /etc/ssl/private/snhebrok-eval.cs.uni-paderborn.de.pem:/cert.pem:ro \
-    -p 8080:80 \
-    -p 8443:443 \
+    -v "$(pwd)"/../graph_res:/usr/share/nginx/html:ro \
+    -v "$(pwd)"/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
+    -v "$_CERT_PATH".key:/key.pem:ro \
+    -v "$_CERT_PATH".pem:/cert.pem:ro \
+    -p 9080:80 \
+    -p 9443:443 \
     -d \
     nginx

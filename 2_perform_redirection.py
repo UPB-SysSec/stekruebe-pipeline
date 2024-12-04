@@ -169,6 +169,7 @@ class _Stats:
 
         return ret
 
+
 STATS = _Stats()
 STATS_INTERVAL = 60
 
@@ -303,6 +304,7 @@ ZGRAB2_FILTER = JsonFilter(
     "!data.http.result.response.request.tls_log",
     "*.handshake_log.server_certificates.chain.parsed",
 )
+
 
 class Zgrab2Scanner(Scanner):
     def build_command(
@@ -664,6 +666,9 @@ def main(
     print(STATS)
 
 
+# region TEST Stuff
+
+
 def evaluate_missing_pairs(missing_domain_ip_pairs: dict[tuple[str, str], ScanVersion], parallelize, collection_name):
     raise NotImplementedError("broken since creating scancontext")
 
@@ -733,9 +738,9 @@ def test_with_zgrab(domain: str):
     Domain(domain).evaluate()
 
 
+# endregion TEST Stuff
+
 if __name__ == "__main__":
-    # test("latam.com")
-    # test_with_zgrab("latam.com")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s | %(process)d %(processName)s - %(name)s.%(funcName)s: %(message)s",
@@ -745,9 +750,3 @@ if __name__ == "__main__":
     # debug.MemoryMonitor(key_type="traceback", limit=10, trace_depth=10).start()
     # main(64*3, explicit_collection="test")
     main(64 * 3)  # PROD
-    # To find a test cluster MATCH (n:DOMAIN) RETURN n.clusterID, count(n.clusterID) as c ORDER BY c DESC
-    # main(
-    #     60,
-    #     dummy_scanner=False,
-    #     explicit_collection="test",
-    # )  # DEV

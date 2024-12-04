@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -18,5 +19,6 @@ class _Credentials:
         return f"{self.username}:{self.password}"
 
 
-mongodb_creds = _Credentials.from_file("mongo/credentials")
-neo4j_creds = _Credentials.from_file("neo4j/credentials")
+_base_dir = Path(__file__).parent.parent
+mongodb_creds = _Credentials.from_file(_base_dir / "mongo/credentials")
+neo4j_creds = _Credentials.from_file(_base_dir / "neo4j/credentials")

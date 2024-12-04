@@ -9,7 +9,7 @@ docker run \
 	--name steckruebe-html-import \
 	-v "$(pwd)"/htmlneo4jdata:/data \
 	-v "$(pwd)"/import:/import \
-	neo4j:5.13.0 \
+	neo4j:5.25.1 \
 neo4j-admin database import full \
  	--nodes /import/initial_html_header.csv,/import/initial_html.csv \
 	--nodes /import/resumption_html_header.csv,/import/resumption_html.csv \
