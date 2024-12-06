@@ -322,6 +322,7 @@ if __name__ == "__main__":
         stream=sys.stdout,
     )
     logging.getLogger("neo4j").setLevel(logging.WARNING)
+    logging.getLogger("neo4j.pool").setLevel(logging.ERROR)
     logging.getLogger("pymongo").setLevel(logging.WARNING)
     try:
         main()

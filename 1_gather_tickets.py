@@ -963,6 +963,7 @@ if __name__ == "__main__":
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s %(levelname)-7s | %(name)-25s.%(funcName)-15s: %(message)s",
+        stream=sys.stdout,
     )
 
     if len(sys.argv) > 1:

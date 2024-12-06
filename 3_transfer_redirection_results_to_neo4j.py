@@ -1,7 +1,5 @@
-import time
 import subprocess
 import csv
-from tqdm import tqdm
 import logging as logging
 import sys
 import time
@@ -13,38 +11,16 @@ from pprint import pformat, pprint
 from typing import Optional, Union
 from urllib.parse import urlparse
 
-import bson
-import shutil
-import Levenshtein
-from utils.botp import BagOfTreePaths
 import utils.json_serialization as json
-from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, XMLParsedAsHTMLWarning
-from bson import ObjectId
 from neo4j import Driver as Neo4jDriver
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_serializer,
-    field_validator,
-    model_serializer,
-    model_validator,
-)
-from pymongo import IndexModel
 from pymongo.collection import Collection
-from pymongo.errors import DocumentTooLarge, _OperationCancelled
-from utils.credentials import mongodb_creds, neo4j_creds
 from utils.db import (
-    MongoCollection,
-    MongoDB,
-    Neo4j,
     connect_mongo,
-    connect_neo4j,
     get_most_recent_collection_name,
 )
 from utils.misc import catch_exceptions
 from utils.result import Zgrab2ResumptionResult
-from utils.result import Connectable, ScanVersion, Zgrab2ResumptionResultStatus
+from utils.result import ScanVersion
 from pathlib import Path
 from tqdm import tqdm
 
@@ -361,11 +337,23 @@ class InitialHTMLNode(HTMLNode):
     _HEADER_FILENAME = _NEO4J_PATH_IMPORT / "initial_html_header.csv"
     rows = []
 
-    def __init__(self, doc_id, ip, domain, version):
+    def __init__(self, doc_id, ip, domain, version, cert_fingerprint):
         super().__init__(doc_id, ip, domain, version, labels="HTML;INITIAL_HTML")
+        self.cert_fingerprint = cert_fingerprint
 
     def header():
-        return ":ID(Initial-ID),doc_id,ip,domain,version,:LABEL"
+        return ":ID(Initial-ID),doc_id,ip,domain,version,cert_fingerprint,:LABEL"
+
+    def row(self):
+        return (
+            self.id(),
+            self.doc_id,
+            self.ip,
+            self.domain,
+            self.version,
+            self.cert_fingerprint,
+            self.labels,
+        )
 
     def write(self):
         all_node_ids.add(self.id())
@@ -423,21 +411,43 @@ class Relationship:
     _FILENAME = _NEO4J_PATH_IMPORT / "html_edges.csv"
     _HEADER_FILENAME = _NEO4J_PATH_IMPORT / "html_edges_header.csv"
 
-    def __init__(self, initial: InitialHTMLNode, resumption: ResumptionHTMLNode, classification, reason):
+    def __init__(
+        self,
+        initial: InitialHTMLNode,
+        resumption: ResumptionHTMLNode,
+        classification,
+        classification_reason,
+        classification_value_initial=None,
+        classification_value_redirect=None,
+    ):
         self.initial = initial
         self.resumption = resumption
         self.classification = classification
         # escape , because it is used as delimiter
-        self.reason = reason.replace(",", ";")
+        self.classification_reason = classification_reason.replace(",", ";")
         # self.edge_writer = edge_writer
+        self.classification_value_initial = (
+            str(classification_value_initial).replace(",", ";") if classification_value_initial else None
+        )
+        self.classification_value_redirect = (
+            str(classification_value_redirect).replace(",", ";") if classification_value_initial else None
+        )
 
     def header():
-        return ":START_ID(Initial-ID),:END_ID(Resumption-ID),:TYPE,classification,reason"
+        return ":START_ID(Initial-ID),:END_ID(Resumption-ID),:TYPE,classification,c_reason,c_value_initial,c_value_redirect"
 
     def row(self):
         # classification is a string and needs to be quoted for the import tool
         # return (self.initial_id, self.resumption_id, "RESUMED_AT", f'{self.classification}', f'{self.reason}')
-        return (self.initial.id(), self.resumption.id(), "RESUMED_AT", self.classification, self.reason)
+        return (
+            self.initial.id(),
+            self.resumption.id(),
+            "RESUMED_AT",
+            self.classification,
+            self.classification_reason,
+            self.classification_value_initial,
+            self.classification_value_redirect,
+        )
 
     def write(self):
         assert self.initial.id() in all_node_ids, f"{self.initial.id()} not in {all_node_ids}"
@@ -470,6 +480,7 @@ def classify(doc, rows, insert_result: bool = True):
         ip=result.initial._ip,
         domain=result.domain_from,
         version="TLSv1.2" if result.version is ScanVersion.TLS1_2 else "TLSv1.3",
+        cert_fingerprint=result.initial.parsed_certificate["fingerprint_sha256"],
     )
     initial_rows.append(initial.row())
     for i, redirect in enumerate(result.redirect):
@@ -496,9 +507,10 @@ def classify(doc, rows, insert_result: bool = True):
             initial=initial,
             resumption=resumption,
             classification=classification.classification.name,
-            reason=classification.reason,
+            classification_reason=classification.reason,
+            classification_value_initial=classification.value_initial,
+            classification_value_redirect=classification.value_redirect,
         )
-        raise NotImplementedError("TODO: write full info to edge (value a, b)")
         # edge_writer.writerow(edge.row())
         edge_rows.append(edge.row())
 
@@ -545,7 +557,7 @@ def prepare_bulk_import_files(collection_filter=None, LIMIT=None):
     edge_rows = []
     rows = (initial_rows, resumption_rows, edge_rows)
     with ProcessPool() as pool:
-        for doc in tqdm(db_items, total=_COUNT, mininterval=5, file=sys.stdout):
+        for doc in tqdm(db_items, total=_COUNT, mininterval=2):
             classify(doc, rows)
     with open(InitialHTMLNode._FILENAME, "w") as InitialHTMLNode.FILE, open(
         ResumptionHTMLNode._FILENAME, "w"
@@ -580,8 +592,10 @@ def main(collection_name=None, collection_filter=None, LIMIT=None):
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stdout,
     )
     logging.getLogger("neo4j").setLevel(logging.WARNING)
+    logging.getLogger("pymongo").setLevel(logging.WARNING)
     ScanContext.initialize(mongo_collection_name=collection_name)
     LOGGER.info(f"Analyzing collection {ScanContext.mongo_collection.full_name}")
 

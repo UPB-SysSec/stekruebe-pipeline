@@ -1,7 +1,6 @@
 import abc
 import logging
 import subprocess
-import sys
 import tempfile
 from typing import Any
 from neo4j import GraphDatabase, Driver, Session, Result
@@ -12,15 +11,12 @@ import datetime
 import multiprocessing
 from multiprocessing import Pool as ProcessPool
 from multiprocessing.pool import ThreadPool
-from pymongo import MongoClient
 from pymongo.collection import Collection
 from threading import Thread
 import inspect
 import traceback
 from utils import JsonFilter
-from itertools import product
 from utils.botp import BagOfTreePaths, BagOfXPaths
-from utils.credentials import mongodb_creds, neo4j_creds
 from utils import json_serialization as json
 from utils.result import Connectable, Zgrab2ResumptionResult, ScanVersion, Zgrab2ResumptionResultStatus
 from utils.misc import extract_title
@@ -744,6 +740,7 @@ if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s | %(process)d %(processName)s - %(name)s.%(funcName)s: %(message)s",
+        stream=sys.stdout,
     )
     logging.getLogger("neo4j").setLevel(logging.CRITICAL)
     # from utils import debug

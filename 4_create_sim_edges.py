@@ -1,51 +1,21 @@
 import time
-import subprocess
-import csv
 from tqdm import tqdm
 import logging as logging
-import sys
 import time
 from dataclasses import dataclass
-from enum import Enum, StrEnum
 from multiprocessing.pool import Pool as ProcessPool
 from multiprocessing.pool import ThreadPool
 from pprint import pformat, pprint
 from typing import Optional, Union
 from urllib.parse import urlparse
 
-import bson
-import shutil
-import Levenshtein
-from utils.botp import BagOfTreePaths
-import utils.json_serialization as json
-from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, XMLParsedAsHTMLWarning
-from bson import ObjectId
 from neo4j import Driver as Neo4jDriver
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_serializer,
-    field_validator,
-    model_serializer,
-    model_validator,
-)
-from pymongo import IndexModel
 from pymongo.collection import Collection
-from pymongo.errors import DocumentTooLarge, _OperationCancelled
-from utils.credentials import mongodb_creds, neo4j_creds
 from utils.db import (
-    MongoCollection,
-    MongoDB,
-    Neo4j,
     connect_mongo,
     connect_neo4j,
     get_most_recent_collection_name,
 )
-from utils.misc import catch_exceptions
-from utils.result import Zgrab2ResumptionResult
-from utils.result import Connectable, ScanVersion, Zgrab2ResumptionResultStatus
-from pathlib import Path
 from tqdm import tqdm
 
 LOGGER = logging.getLogger(__name__)
@@ -362,7 +332,7 @@ def maybe_parallel_imap_unordered(func, iterable, parallel):
             yield res
 
 
-def build_similarity_edges(parallel=True):
+def build_colored_edges(parallel=True):
     # create WHITE edge for all LOOK_AT_METRICS initial -> resumption
     res = perform_apoc_query(
         """
@@ -450,8 +420,8 @@ def build_edges():
         raise ConnectionError("Could not connect to Neo4J")
     LOGGER.info("[1] Building indices")
     create_indices()
-    LOGGER.info("[2] Building similarity edges")
-    build_similarity_edges()
+    LOGGER.info("[2] Building colored edges")
+    build_colored_edges()
     LOGGER.info("[3] Postprocessing similarity edges (creating SIM edges)")
     build_sim_edges()
 
@@ -460,6 +430,7 @@ def main(collection_name=None, collection_filter=None, LIMIT=None):
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stdout,
     )
     logging.getLogger("neo4j").setLevel(logging.WARNING)
     ScanContext.initialize(mongo_collection_name=collection_name)

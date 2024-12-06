@@ -17,11 +17,13 @@ else
     . .venv/bin/activate
 fi
 
+docker stop steckruebe-html-database || true
+docker stop steckruebe-prefix-database || true
 
 echo "[#] Gathering Tickets"
 
 date "+%s: %c"
-python3 1_gather_tickets.py ../tranco_V9K7N.csv 1000000
+python3 1_gather_tickets.py ../tranco_V9V2N.csv 1000
 date "+%s: %c"
 
 cat out/7_merged_zgrab.r*.json > out/7_merged_zgrab_all.json
@@ -38,7 +40,7 @@ date "+%s: %c"
 python3 generate_prefix_bulk_csv.py
 date "+%s: %c"
 echo "[ ] Importing into Neo4j"
-./run_prefix_neo4j.sh
+./import_prefix_csv.sh
 echo "[ ] Starting Neo4j"
 ./run_prefix_neo4j.sh
 sleep 30
@@ -56,7 +58,7 @@ docker stop steckruebe-prefix-database
 echo "[ ] Transfering scan results to neo4j"
 date "+%s: %c"
 python3 3_transfer_redirection_results_to_neo4j.py
-date "+%s: %c"
+# date "+%s: %c"
 
 echo "[ ] Creating SIM edges"
 date "+%s: %c"
