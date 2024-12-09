@@ -1,3 +1,4 @@
+import glob
 from typing import Any
 import plotly.graph_objects as go
 from dataclasses import dataclass, field
@@ -9,13 +10,12 @@ import types
 import inspect
 
 OUTDIR = functools.partial(op.join, "out")
-TRANCO = "tranco_7X8NX.csv"
-# OUTDIR = functools.partial(op.join, "out")
-# TRANCO = "tranco_LYK84.csv"
+TRANCO = "../tranco_V9V2N.csv"
 
 _ERROR_NODES = False
 _FIX_X = True
 _EDGE_SOURCE_COLOR = False
+_ZMAP_TO_SANS_LOOP = False
 
 
 class COLORS:
@@ -75,6 +75,8 @@ class Domain:
     phase_associations: dict["Phase Class", Node] = field(default_factory=dict)
     ip4s: set[str] = field(default_factory=set)
     ip6s: set[str] = field(default_factory=set)
+    zgrab_status12: set[str] = field(default_factory=set)
+    zgrab_status13: set[str] = field(default_factory=set)
 
 
 PHASES = []
@@ -87,31 +89,39 @@ def phase(cls):
 
 _DATA = {}
 try:
-    with open(OUTDIR("stats.csv"), newline="") as f:
+    with open(OUTDIR("missing.csv"), newline="") as f:
         reader = csv.reader(f)
         for row in reader:
-            a, b, c = row
-            if a not in _DATA:
-                _DATA[a] = {}
-            assert b not in _DATA[a]
-            _DATA[a][b] = json.loads(c)
+            stage, key, value = row
+            if key == "output_size":
+                continue
+            value = float(value)
+
+            _DATA[stage] = _DATA.get(stage, 0) + value
+            # if a not in _DATA:
+            #     _DATA[a] = {}
+            # assert b not in _DATA[a]
+            # _DATA[a][b] = float(c)
 except FileNotFoundError:
     _DATA = dict(
         ReadTranco=dict(output_size=1_000_000),
         ZDNS=dict(status_counts={}, only_v4=0, both_v4_and_v6=0, only_v6=0, no_ips=0),
     )
-    with open(OUTDIR("0_resolved.json")) as f:
+for resolved_file in glob.glob(OUTDIR("0_resolved*.json")):
+    with open(resolved_file) as f:
         for ln in f:
             item = json.loads(ln)
             status = item["status"]
             if status not in _DATA["ZDNS"]["status_counts"]:
                 _DATA["ZDNS"]["status_counts"][status] = 0
             _DATA["ZDNS"]["status_counts"][status] += 1
+print(_DATA)
 
 
 @phase
-class tranco:
-    T1M = Node("T1M", COLORS.black, _DATA["ReadTranco"]["output_size"])
+class inputs:
+    TRANCO_T1M = Node("T1M", COLORS.black, _DATA["ReadTranco"]["output_size"])
+    SANS = Node("SANS", COLORS.black, None)
 
 
 @phase
@@ -171,6 +181,7 @@ class zgrab:
 
 
 # create edges by iterating over all domains
+# TRANCO is only the beginning, from second run onward they come from the resolved files
 
 domains: dict[str, Domain] = {}
 
@@ -180,123 +191,155 @@ with open(TRANCO) as f:
     for row in reader:
         _, domain_name = row
         domain = domains[domain_name] = Domain()
-        domain.phase_associations[tranco] = tranco.T1M
+        domain.phase_associations[inputs] = inputs.TRANCO_T1M
+for resolved_file in glob.glob(OUTDIR("0_resolved*.json")):
+    with open(resolved_file) as f:
+        if ".r00" in f.name:
+            continue
+        for ln in f:
+            item = json.loads(ln)
+            domain_name = item.get("name")
+            if not domain_name:
+                continue
+            domain = domains[domain_name] = Domain()
+            domain.phase_associations[inputs] = inputs.SANS
+
 
 print("Loading IP Addresses")
-with open(OUTDIR("0_resolved.json")) as f:
-    for ln in f:
-        item = json.loads(ln)
-        domain_name = item["name"]
-        domain = domains[domain_name]
-        domain.ip4s = set(item.get("data", {}).get("ipv4_addresses", []))
-        domain.ip6s = set(item.get("data", {}).get("ipv6_addresses", []))
-        domain.phase_associations[zdns] = getattr(zdns, item["status"])
-        if domain.ip4s and domain.ip6s:
-            domain.phase_associations[resolved] = resolved.v4_6
-        elif domain.ip4s:
-            domain.phase_associations[resolved] = resolved.v4
-        elif domain.ip6s:
-            domain.phase_associations[resolved] = resolved.v6
-        else:
-            domain.phase_associations[resolved] = resolved.no_ip
+for resolved_file in glob.glob(OUTDIR("0_resolved*.json")):
+    with open(resolved_file) as f:
+        for ln in f:
+            item = json.loads(ln)
+            domain_name = item.get("name")
+            if not domain_name:
+                print("No domain item in", f.name)
+                continue
+            domain = domains[domain_name]
+            data = item.get("data") or {}  # assigns dict() even when data exists but null
+            domain.ip4s.update(data.get("ipv4_addresses", []))
+            domain.ip6s.update(data.get("ipv6_addresses", []))
+            domain.phase_associations[zdns] = getattr(zdns, item["status"])
+for domain in domains.values():
+    if domain.ip4s and domain.ip6s:
+        domain.phase_associations[resolved] = resolved.v4_6
+    elif domain.ip4s:
+        domain.phase_associations[resolved] = resolved.v4
+    elif domain.ip6s:
+        domain.phase_associations[resolved] = resolved.v6
+    else:
+        domain.phase_associations[resolved] = resolved.no_ip
 
 print("Loading blocked")
-with open(OUTDIR("2_resolved_filtered_v4.ips")) as f4, open(OUTDIR("2_resolved_filtered_v6.ips")) as f6:
-    ip4s = set(map(lambda x: x.strip(), f4))
-    ip6s = set(map(lambda x: x.strip(), f6))
+blocklist_ip4s = set()
+blocklist_ip6s = set()
+for resolved_filtered_file_v4 in glob.glob(OUTDIR("2_resolved_filtered_v4*.ips")):
+    with open(resolved_filtered_file_v4) as f4:
+        blocklist_ip4s.update(map(lambda x: x.strip(), f4))
+for resolved_filtered_file_v6 in glob.glob(OUTDIR("2_resolved_filtered_v6*.ips")):
+    with open(resolved_filtered_file_v6) as f6:
+        blocklist_ip6s.update(map(lambda x: x.strip(), f6))
 
-    for domain in domains.values():
-        overlap4 = domain.ip4s & ip4s
-        overlap6 = domain.ip6s & ip6s
-        if overlap4 and overlap6:
-            domain.phase_associations[blocklist] = blocklist.v4_6
-        elif overlap4:
-            domain.phase_associations[blocklist] = blocklist.v4
-        elif overlap6:
-            domain.phase_associations[blocklist] = blocklist.v6
-        else:
-            domain.phase_associations[blocklist] = blocklist.blocklist
+for domain in domains.values():
+    overlap4 = domain.ip4s & blocklist_ip4s
+    overlap6 = domain.ip6s & blocklist_ip6s
+    if overlap4 and overlap6:
+        domain.phase_associations[blocklist] = blocklist.v4_6
+    elif overlap4:
+        domain.phase_associations[blocklist] = blocklist.v4
+    elif overlap6:
+        domain.phase_associations[blocklist] = blocklist.v6
+    else:
+        domain.phase_associations[blocklist] = blocklist.blocklist
+# blocklist_ip4s.clear()
+# blocklist_ip6s.clear()
 
 print("Loading zmap results")
-with open(OUTDIR("3_https_hosts_v4.ips")) as f4, open(OUTDIR("3_https_hosts_v6.ips")) as f6:
-    ip4s = set(map(lambda x: x.strip(), f4))
-    ip6s = set(map(lambda x: x.strip(), f6))
+zmap_ip4s = set()
+zmap_ip6s = set()
+for zmap_file_v4 in glob.glob(OUTDIR("3_https_hosts_v4*.ips")):
+    with open(zmap_file_v4) as f4:
+        zmap_ip4s.update(map(lambda x: x.strip(), f4))
+for zmap_file_v6 in glob.glob(OUTDIR("3_https_hosts_v6*.ips")):
+    with open(zmap_file_v6) as f6:
+        zmap_ip6s.update(map(lambda x: x.strip(), f6))
 
-    for domain in domains.values():
-        overlap4 = domain.ip4s & ip4s
-        overlap6 = domain.ip6s & ip6s
-        if overlap4 and overlap6:
-            domain.phase_associations[zmap] = zmap.v4_6
-        elif overlap4:
-            domain.phase_associations[zmap] = zmap.v4
-        elif overlap6:
-            domain.phase_associations[zmap] = zmap.v6
-        else:
-            domain.phase_associations[zmap] = zmap.closed
+for domain in domains.values():
+    overlap4 = domain.ip4s & zmap_ip4s & blocklist_ip4s
+    overlap6 = domain.ip6s & zmap_ip6s & blocklist_ip6s
+    if overlap4 and overlap6:
+        domain.phase_associations[zmap] = zmap.v4_6
+    elif overlap4:
+        domain.phase_associations[zmap] = zmap.v4
+    elif overlap6:
+        domain.phase_associations[zmap] = zmap.v6
+    else:
+        domain.phase_associations[zmap] = zmap.closed
+zmap_ip4s.clear()
+zmap_ip6s.clear()
 
 print("Loading zgrab")
-with open(OUTDIR("7_merged_zgrab.json")) as f:
-    for ln in f:
-        item = json.loads(ln)
-        domain_name = item["domain"]
-        domain = domains[domain_name]
+for zgrab_file in glob.glob(OUTDIR("7_merged_zgrab*.json")):
+    with open(zgrab_file) as f:
+        for ln in f:
+            item = json.loads(ln)
+            domain_name = item["domain"]
+            domain = domains[domain_name]
 
-        tickets = sum(map(lambda x: 1 if x.get("ticket") else 0, item["results"]))
-
-        # STATUSes per version: ticket, no_ticket, error
-        status_13 = set()
-        status_12 = set()
-        errors = set()
-
-        def get_status(item, ticket_key):
-            status = item["status"]
-            if ticket_key in item:
-                assert status == "success"
-                return "ticket"
-            else:
-                return item["status"]
-
-        for result in item["results"]:
-            status_12.add(get_status(result["tls1_0-1_2"], "ticket"))
-            status_13.add(get_status(result["https-tls1_3"], "tickets"))
-
-        def flatten_statii(statii):
-            if "ticket" in statii:
-                return "ticket"
-            elif "success" in statii:
-                return "no_ticket"
-            else:
-                errors.update(statii)
-                return "error"
-
-        status_12 = flatten_statii(status_12)
-        status_13 = flatten_statii(status_13)
-
-        if status_12 == "ticket" and status_13 == "ticket":
-            classification = zgrab.ticket_12_13
-        elif status_12 == "ticket":
-            classification = zgrab.ticket_12
-        elif status_13 == "ticket":
-            classification = zgrab.ticket_13
-        elif status_12 == "no_ticket" or status_13 == "no_ticket":
-            classification = zgrab.no_ticket
-        else:
-            if _SUMMARIZE_ZGRAB_ERRORS:
-                classification = zgrab.error
-            else:
-                # classification = "+".join(sorted(errors))
-                if len(errors) > 1:
-                    classification = zgrab.multiple_errors
+            def get_status(item, ticket_key):
+                status = item["status"]
+                if ticket_key in item:
+                    assert status == "success"
+                    return "ticket"
                 else:
-                    classification = errors.pop()
+                    return item["status"]
 
-        if isinstance(classification, str):
-            if not hasattr(zgrab, classification):
-                print("Adding", classification)
-                setattr(zgrab, classification, Node(classification, COLORS.red, None, True))
-            domain.phase_associations[zgrab] = getattr(zgrab, classification)
+            for result in item["results"]:
+                domain.zgrab_status12.add(get_status(result["https-tls1_0-1_2"], "ticket"))
+                domain.zgrab_status13.add(get_status(result["https-tls1_3"], "tickets"))
+
+for domain in domains.values():
+    # tickets = sum(map(lambda x: 1 if x.get("ticket") else 0, item["results"]))
+
+    # STATUSes per version: ticket, no_ticket, error
+    errors = set()
+
+    def flatten_statii(statii):
+        if "ticket" in statii:
+            return "ticket"
+        elif "success" in statii:
+            return "no_ticket"
         else:
-            domain.phase_associations[zgrab] = classification
+            errors.update(statii)
+            return "error"
+
+    status_12 = flatten_statii(domain.zgrab_status12)
+    status_13 = flatten_statii(domain.zgrab_status13)
+
+    if status_12 == "ticket" and status_13 == "ticket":
+        classification = zgrab.ticket_12_13
+    elif status_12 == "ticket":
+        classification = zgrab.ticket_12
+    elif status_13 == "ticket":
+        classification = zgrab.ticket_13
+    elif status_12 == "no_ticket" or status_13 == "no_ticket":
+        classification = zgrab.no_ticket
+    else:
+        if _SUMMARIZE_ZGRAB_ERRORS:
+            classification = zgrab.error
+        else:
+            # classification = "+".join(sorted(errors))
+            if len(errors) > 1:
+                classification = zgrab.multiple_errors
+            else:
+                classification = errors.pop()
+
+    if isinstance(classification, str):
+        if not hasattr(zgrab, classification):
+            print("Adding", classification)
+            setattr(zgrab, classification, Node(classification, COLORS.red, None, True))
+        domain.phase_associations[zgrab] = getattr(zgrab, classification)
+    else:
+        domain.phase_associations[zgrab] = classification
 
 
 print("Loading Nodes")
@@ -329,11 +372,11 @@ for domain in domains.values():
             if _ERROR_NODES:
                 domain.phase_associations[phaser] = phaser._err_node
             elif phaser in domain.phase_associations:
-                assert domain.phase_associations[phaser].is_err
+                assert domain.phase_associations[phaser].is_err, (domain, phaser)
                 del domain.phase_associations[phaser]
         else:
-            node_r = domain.phase_associations[phaser]
-            if node_r.is_err:
+            node_r = domain.phase_associations.get(phaser)
+            if node_r and node_r.is_err:
                 # entering error state - forward into generic error states afterwards
                 has_error = True
 
@@ -342,7 +385,7 @@ for domain in domains.values():
     for phasel, phaser in zip(PHASES, PHASES[1:]):
         node_l = domain.phase_associations[phasel]
         if phaser not in domain.phase_associations:
-            assert node_l.is_err
+            assert node_l.is_err, node_l
             break
         node_r = domain.phase_associations[phaser]
         if (node_l, node_r) not in edges:
@@ -352,6 +395,22 @@ for domain in domains.values():
         node_l.actual_value_out += 1
         node_r.actual_value_in += 1
         edge.value += 1
+if _ZMAP_TO_SANS_LOOP:
+    for domain in domains.values():
+        if domain.phase_associations[inputs] is inputs.SANS:
+            # insert edge from zmap to sans
+            if zmap not in domain.phase_associations:
+                continue
+            if domain.phase_associations[zmap] is zmap.closed:
+                continue
+            node_l = domain.phase_associations[zmap]
+            node_r = domain.phase_associations[inputs]
+            if (node_l, node_r) not in edges:
+                edges[(node_l, node_r)] = Edge(0)
+            edge = edges[(node_l, node_r)]
+            node_l.actual_value_out += 1
+            node_r.actual_value_in += 1
+            edge.value += 1
 
 # set edge colors
 for (a, b), edge in edges.items():
@@ -388,4 +447,4 @@ fig = go.Figure(
 
 # fig.update_layout(title_text="Basic Sankey Diagram", font_size=10)
 # fig.show()
-fig.write_html("graph/stats.html")
+fig.write_html("graph_res/stats.html")

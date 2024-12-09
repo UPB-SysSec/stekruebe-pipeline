@@ -1,0 +1,1 @@
+pv 7_merged_zgrab_all.json | jq .ip | uniq > unique_ips
