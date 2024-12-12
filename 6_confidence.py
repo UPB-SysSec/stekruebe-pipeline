@@ -121,13 +121,7 @@ def calculate_confidence(r, target_sim):
         print("Ex", e, type(e))
     
 
-def main(collection_name=None):
-    target_sim = "similarity_levenshtein"
-    start = time.time()
-
-    ScanContext.initialize(mongo_collection_name=collection_name)
-    start = time.time()
-    res = ScanContext.neo4j.session().run("""
+    """
             MATCH (I)-[IR: SIM { first_color: "WHITE" }]-()
             WITH I, IR,
                 COLLECT { 
@@ -138,12 +132,38 @@ def main(collection_name=None):
                 } as other_a,
                 COLLECT {
                     MATCH (I)-[B: SIM]-(b)
-                    WHERE B[$sim_typ] IS NOT NULL
-                    AND b.domain <> I.domain
+                    WHERE b.domain <> I.domain
+                    AND B[$sim_typ] IS NOT NULL
                     RETURN [b.domain, B[$sim_typ]]
                 } as a_b
             RETURN elementId(IR) as id, IR, other_a, a_b
-            LIMIT 1000
+            LIMIT 10000
+            """
+
+def main(collection_name=None):
+    target_sim = "similarity_levenshtein"
+    start = time.time()
+
+    ScanContext.initialize(mongo_collection_name=collection_name)
+    start = time.time()
+    res = ScanContext.neo4j.session().run("""
+            MATCH (I:INITIAL_HTML)-[IR: SIM { first_color: "WHITE" }]->(x:REDIRECT_HTML)
+            WITH I, IR,
+                COLLECT { 
+                    MATCH (a:HTML)-[A:SIM]-(I)
+                    USING INDEX a:HTML (domain)
+                    WHERE a.domain = I.domain
+                    AND A[$sim_typ] IS NOT NULL
+                    RETURN A[$sim_typ]
+                } as other_a,
+                COLLECT {
+                    MATCH (I)-[B: SIM]-(b:HTML)
+                    WHERE b.domain <> I.domain
+                    AND B[$sim_typ] IS NOT NULL
+                    RETURN [b.domain, B[$sim_typ]]
+                } as a_b
+            RETURN elementId(IR) as id, IR, other_a, a_b
+            LIMIT 100000
             """, { "sim_typ":  target_sim}, routing_=RoutingControl.READ)
 #                    ORDER BY b.domain
     with ProcessPoolExecutor() as executor:
@@ -156,46 +176,6 @@ def main(collection_name=None):
     #plt.grid(True, linestyle='--', alpha=0.5)
     #plt.yscale('log')
     #plt.savefig('hist.png')
-
-
-def test(collection_name=None):
-    global proc_pool
-    target_sim = "similarity_levenshtein"
-
-    ScanContext.initialize(mongo_collection_name=collection_name)
-    result = ScanContext.neo4j.session().run(
-        """
-        MATCH (I)-[IR:SIM { first_color: "WHITE" }]-(R:REDIRECT_HTML)
-        RETURN COUNT(*) AS result_count
-        """
-    )
-    print(result.single()["result_count"])
-
-    return
-
-    start = time.time()
-    res = ScanContext.neo4j.session().run("""
-            MATCH (I)-[IR: SIM { first_color: "WHITE" }]-(R:REDIRECT_HTML)
-                WITH I, IR, R,
-                    COLLECT {
-                        MATCH (R)-[B: SIM]-(b)
-                        WHERE I.domain <> b.domain
-                        AND B[$sim_typ] > 0.9
-                        RETURN[b, B]
-                        ORDER BY B[$sim_typ] DESC
-                        LIMIT 1
-                    } as other_b
-                WHERE size(other_b) > 0
-                AND other_b[0][0].domain = "www.billionaireapk.com"
-                RETURN I, IR, R, other_b
-                """, { "sim_typ":  target_sim}, routing_=RoutingControl.READ)
-    i = 0
-    for r in res:
-        print(r.get("R").get("domain"))
-        i+=1
-    print(i)
-
-
 
 if __name__ == "__main__":
     logging.basicConfig(
