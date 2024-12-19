@@ -24,7 +24,6 @@ import utils.json_serialization as json
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, XMLParsedAsHTMLWarning
 from bson import ObjectId
 from neo4j import Driver as Neo4jDriver
-from neo4j import GraphDatabase
 from neo4j import RoutingControl
 from neo4j.graph import Node
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_serializer, model_validator
@@ -40,10 +39,15 @@ from tqdm import tqdm
 import numpy as np
 import scipy.stats as stats
 import matplotlib.pyplot as plt
-from joblib import Parallel, delayed
 import math
 
 from collections import defaultdict
+
+
+from collections import Counter
+import os
+from time import sleep
+
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
@@ -70,15 +74,16 @@ class ScanContext:
         #ScanContext.mongo_collection = database[mongo_collection_name]
 
 
-def write_transaction(tx, rel_id, property_name, property_value):
+def write_transaction(tx, rel_id, metric, domainname, confidence):
     query = """
     MATCH ()-[r]->()
     WHERE elementId(r) = $rel_id
-    SET r[$property_name] = $property_value
+    SET r[$property_name_1] = $property_value_1
+    SET r[$property_name_2] = $property_value_2
     """
-    result = tx.run(query, rel_id=rel_id, property_name=property_name, property_value=json.dumps(property_value))
-    return result.single()
-
+    if confidence > 2:
+        print(domainname)
+    tx.run(query, rel_id=rel_id, property_name_1=metric+"_maxconf_domain", property_value_1=domainname, property_name_2=metric+"_maxconf_val", property_value_2=confidence)
 
 def calculate_confidence(r, target_sim):
     target_relationship = r.get("IR")
@@ -86,37 +91,45 @@ def calculate_confidence(r, target_sim):
     if resumtionsimilarity is None: return
     samesitesimilarities = np.array(r.get("other_a"))
 
-    mean_x = np.mean(samesitesimilarities)
-    error_x = stats.sem(samesitesimilarities, nan_policy='propagate') or 1e-12
-    z_value_x = abs((resumtionsimilarity - mean_x) /error_x)
-    cdf_x = stats.norm.sf(z_value_x)
+    if len(samesitesimilarities) == 0:
+            maximum_confidence = ("-", 0.0)
+    else:
+        mean_x = np.mean(samesitesimilarities)
+        error_x = (np.std(samesitesimilarities, ddof=1, mean=mean_x) / np.sqrt(len(samesitesimilarities)-1)) or 1e-12
+        z_value_x = abs((resumtionsimilarity - mean_x) /error_x)
+        cdf_x = stats.norm.sf(z_value_x)
 
-    def __do(y):
-        n = len(y)
-        if n < 2:
-            return 0.0
-        mean_y = np.mean(y)
-        #error_y_1 = stats.sem(y, nan_policy='propagate') or 1e-12
-        #Mathematical hack so things go wooosh
-        error_y = (np.std(y, ddof=1, mean=mean_y) / np.sqrt(n-1)) or 1e-12
-        z_value_y = abs((resumtionsimilarity - mean_y) /error_y)
-        cdf_y = stats.norm.sf(z_value_y)
-        return (cdf_y - cdf_x) * 2
+        def __do(y):
+            n = len(y)
+            if n < 2:
+                return 0.0
+            mean_y = np.mean(y)
+            #error_y_1 = stats.sem(y, nan_policy='propagate') or 1e-12
+            #Mathematical hack so things go wooosh
+            error_y = (np.std(y, ddof=1, mean=mean_y) / np.sqrt(n-1)) or 1e-12
+            z_value_y = abs((resumtionsimilarity - mean_y) /error_y)
+            cdf_y = stats.norm.sf(z_value_y)
+            return (cdf_y* 2) - (cdf_x* 2) 
 
 
-    #-1 indicates strong confidence that we have a.com, +1 indicates strong confidence that we resumed b.com, 0 means we don't know cause it either doesn't match any or both
-    #ab = itertools.groupby(r.get("a_b"), lambda x : x[0])
-    abc = defaultdict(list)
-    for x in r.get("a_b"): abc[x[0]].append(x[1])
+        #-1 indicates strong confidence that we have a.com, +1 indicates strong confidence that we resumed b.com, 0 means we don't know cause it either doesn't match any or both
+        #ab = itertools.groupby(r.get("a_b"), lambda x : x[0])
+        abc = defaultdict(list)
+        for x in r.get("a_b"): abc[x[0]].append(x[1])
+        if len(abc) > 0: 
+            confidence_per_domain = [(k, __do(np.array(v))) for k,v in abc.items()]
+            maximum_confidence = max(confidence_per_domain, key=lambda x : x[1])
+        else:
+            maximum_confidence = ("-", 0.0)
+        #confidence_per_domain.sort(key=lambda x:x[1], reverse=True)
 
-    confidence_per_domain = [(k, __do(np.array(v))) for k,v in abc.items()]
-    confidence_per_domain.sort(key=lambda x:x[1], reverse=True)
     try:
-        writeresult = ScanContext.neo4j.session().execute_write(
+        ScanContext.neo4j.session().execute_write(
             write_transaction,
             rel_id=r.get("id"),
-            property_name=f"{target_sim}_conf",
-            property_value=confidence_per_domain)  
+            metric=target_sim,
+            domainname=maximum_confidence[0],
+            confidence=float(maximum_confidence[1]))
     except Exception as e:
         print("Ex", e, type(e))
     
@@ -140,43 +153,45 @@ def calculate_confidence(r, target_sim):
             LIMIT 10000
             """
 
+def calculate(collection_name, target_sim):
+    ScanContext.initialize(mongo_collection_name=collection_name)
+    i = 1
+    while i > 0:
+        #TODO: THIS CRASHES FOR VALUES >100000 DUE TO OUT OF MEM
+        res = ScanContext.neo4j.session().run("""
+                MATCH (I)-[IR: SIM { first_color: "WHITE" }]->()
+                WHERE IR[$conf_typ] is NULL
+                WITH I, IR,
+                    COLLECT { 
+                        MATCH (a:HTML)-[A:SIM]-(I)
+                        USING INDEX a:HTML (domain)
+                        WHERE a.domain = I.domain
+                        RETURN A[$sim_typ]
+                    } as other_a,
+                    COLLECT {
+                        MATCH (I)-[B: SIM]-(b)
+                        WHERE b.domain <> I.domain
+                        RETURN b.domain, B
+                    } as a_b
+                LIMIT 100
+                RETURN elementId(IR) as id, IR, other_a, a_b
+                """, { "sim_typ":  target_sim, "conf_typ": target_sim+"_maxconf_val"}, routing_=RoutingControl.READ)
+        #Somehow doesnt work with multiprocessing
+        #with ProcessPoolExecutor() as executor:
+        #    executor.map(lambda r: calculate_confidence(r, target_sim), res)
+        i = 0
+        for r in res:
+            i+=1
+            calculate_confidence(r, target_sim)
+
 def main(collection_name=None):
-    target_sim = "similarity_levenshtein"
+    #target_sims = ["similarity_levenshtein", "similarity_levenshtein_header", "similarity_bag_of_paths", "similarity_radoy_header"]
     start = time.time()
 
-    ScanContext.initialize(mongo_collection_name=collection_name)
-    start = time.time()
-    res = ScanContext.neo4j.session().run("""
-            MATCH (I:INITIAL_HTML)-[IR: SIM { first_color: "WHITE" }]->(x:REDIRECT_HTML)
-            WITH I, IR,
-                COLLECT { 
-                    MATCH (a:HTML)-[A:SIM]-(I)
-                    USING INDEX a:HTML (domain)
-                    WHERE a.domain = I.domain
-                    AND A[$sim_typ] IS NOT NULL
-                    RETURN A[$sim_typ]
-                } as other_a,
-                COLLECT {
-                    MATCH (I)-[B: SIM]-(b:HTML)
-                    WHERE b.domain <> I.domain
-                    AND B[$sim_typ] IS NOT NULL
-                    RETURN [b.domain, B[$sim_typ]]
-                } as a_b
-            RETURN elementId(IR) as id, IR, other_a, a_b
-            LIMIT 100000
-            """, { "sim_typ":  target_sim}, routing_=RoutingControl.READ)
-#                    ORDER BY b.domain
-    with ProcessPoolExecutor() as executor:
-        executor.map(lambda r: calculate_confidence(r, target_sim), res)
-    #for r in res:
-    #    calculate_confidence(r, target_sim)
+    calculate(collection_name)
+
     print(time.time() - start)
     
-    #plt.hist(list(max_confidence_value_pairs.values()), bins=200)
-    #plt.grid(True, linestyle='--', alpha=0.5)
-    #plt.yscale('log')
-    #plt.savefig('hist.png')
-
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
