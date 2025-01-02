@@ -44,6 +44,7 @@ from joblib import Parallel, delayed
 import math
 from ipaddress import *
 from collections import defaultdict
+from itertools import groupby
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
@@ -76,6 +77,8 @@ def draw_hist(data, filename):
     plt.hist(data, bins=200)
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.yscale('log')
+    plt.ylim(100,10**7)
+    plt.xlim(-1.05,1.05)
     plt.savefig("figures/"+filename)
     plt.clf()
     plt.cla()
@@ -89,7 +92,8 @@ def create_complete_histogram(target_sim):
             WHERE IR."""+target_conf+""" is not NULL
             RETURN IR."""+target_conf+""" AS confval
             """, target_conf=target_conf, routing_=RoutingControl.READ)
-    sims = [x.get("confval") for x in res]
+    sims = [x.get("confval") for x in res if x.get("confval") != '']
+    LOGGER.info(f"Found {len(sims)} total confidence values for {target_sim}")
     draw_hist(sims, "hist_"+target_sim+".png")
     
 
@@ -120,10 +124,25 @@ def is_fastly_ip(ip):
     return is_network_ip(ip, fastly_network_v4, fastly_network_v6)
 
 #File from https://github.com/SecOps-Institute/Akamai-ASN-and-IPs-List/blob/master/akamai_ip_cidr_blocks_raw.lst, Replace if you find anything better. Downloaded: 2024-12-13
-with open("akamai_ip_cidr_blocks_raw.lst") as f:
+with open("ip_lists/akamai_ip_cidr_blocks_raw.lst") as f:
     akamai_network_v4 = [IPv4Network(x.rstrip()) for x in f.readlines()]
+#https://cidr-aggregator.pages.dev/
+with open("ip_lists/akamai_ipv6_list.lst") as f:
+    akamai_network_v6 = [IPv6Network(x.rstrip()) for x in f.readlines()]
 def is_akamai_ip(ip):
-    is_network_ip(ip, akamai_network_v4, [])
+    return is_network_ip(ip, akamai_network_v4, akamai_network_v6)
+
+
+google_network_ipv4 = []
+google_network_ipv6 = []
+with open("ip_lists/google_ips.json") as ips:
+    ipdata = json.load(ips).get("prefixes")
+    for x in ipdata:
+        if x.get("ipv4Prefix") is not None: google_network_ipv4.append(IPv4Network(x.get("ipv4Prefix")))
+        if x.get("ipv6Prefix") is not None: google_network_ipv6.append(IPv6Network(x.get("ipv6Prefix")))
+
+def is_google_ip(ip):
+    return is_network_ip(ip, google_network_ipv4, google_network_ipv6)
 
 def create_network_histogram(target_sim, network_name, network_ip_function):
     target_conf = target_sim+"_maxconf_val"
@@ -133,9 +152,21 @@ def create_network_histogram(target_sim, network_name, network_ip_function):
             WHERE IR."""+target_conf+""" is not NULL
             RETURN IR."""+target_conf+"""  AS confval, x.ip as ip1, y.ip as ip2
             """, target_conf=target_sim+"_maxconf_val", routing_=RoutingControl.READ)
-    sims = [x.get("confval") for x in res if network_ip_function(x.get("ip1")) or network_ip_function(x.get("ip2"))]
-    
+    sims = [x.get("confval") for x in res if x.get("confval") != "" and (network_ip_function(x.get("ip1")) or network_ip_function(x.get("ip2")))]
+
     draw_hist(sims, "cdn_"+network_name+"_"+target_sim+".png")
+
+def create_histogram_without_networks(target_sim):
+    target_conf = target_sim+"_maxconf_val"
+    res = ScanContext.neo4j.session().run("""
+            MATCH (x)-[IR:SIM]->(y)
+            USING INDEX IR:SIM("""+target_conf+""")
+            WHERE IR."""+target_conf+""" is not NULL
+            RETURN IR."""+target_conf+""" AS confval, x.ip as ip1, y.ip as ip2
+            """, target_conf=target_conf, routing_=RoutingControl.READ)
+    sims = [x.get("confval") for x in res if x.get("confval") != '' and not is_akamai_ip(x.get("ip1")) and not is_akamai_ip(x.get("ip2"))
+            and not is_cloudflare_ip(x.get("ip1")) and not is_cloudflare_ip(x.get("ip2")) and not is_fastly_ip(x.get("ip1")) and not is_fastly_ip(x.get("ip2"))]
+    draw_hist(sims, "hist_"+target_sim+"_nocdn.png")
 
 def create_cloudflare_histogram(target_sim):
     create_network_histogram(target_sim, "cloudflare", is_cloudflare_ip)
@@ -146,10 +177,41 @@ def create_fastly_histogram(target_sim):
 def create_akamai_histogram(target_sim):
     create_network_histogram(target_sim, "akamai", is_akamai_ip)
 
+def create_akamai_histogram(target_sim):
+    create_network_histogram(target_sim, "google", is_google_ip)
+
+
+def create_confident_vulnerable_list():
+    target_conf = "similarity_levenshtein_maxconf_val"
+    threshold = 0.5
+    res = ScanContext.neo4j.session().run("""
+        MATCH (I)-[IR:SIM]->(T)
+        USING INDEX IR:SIM("""+target_conf+""")
+        WHERE (IR."""+target_conf+""" is not NULL AND IR."""+target_conf+""">$threshold) OR  (IR.similarity_levenshtein_header_maxconf_val is not NULL AND IR.similarity_levenshtein_header_maxconf_val>$threshold)
+        RETURN IR."""+target_conf+""" AS confval, I.domain as srcdomain, I.ip as srcip, T.ip as dstip, IR.similarity_levenshtein_maxconf_domain as confdomain
+        ORDER BY dstip DESC
+        """, {"target_conf":target_conf, "threshold": threshold}, routing_=RoutingControl.READ)
+    groupedresult = groupby(res, lambda x : x.get("dstip"))
+
+    i = 0
+    for k,v in groupedresult:
+        valueliste = list(v)
+        if is_google_ip(k) or is_google_ip(valueliste[0].get("srcip")):
+            #print("Google", k,valueliste[0].get("srcdomain"), valueliste[0].get("confdomain"))
+            continue
+        if "qq.com" in valueliste[0].get("confdomain"): continue
+        if not ((is_akamai_ip(k) or is_akamai_ip(valueliste[0].get("srcip"))) or (is_cloudflare_ip(k) or is_cloudflare_ip(valueliste[0].get("srcip"))) or (is_fastly_ip(k) or is_fastly_ip(valueliste[0].get("srcip")))):
+            i += 1
+            print(k,len(valueliste), (is_akamai_ip(k) or is_akamai_ip(valueliste[0].get("srcip"))), (is_cloudflare_ip(k) or is_cloudflare_ip(valueliste[0].get("srcip"))),(is_fastly_ip(k) or is_fastly_ip(valueliste[0].get("srcip"))), valueliste[0].get("srcdomain"), valueliste[0].get("confdomain"))
+    print(i)
+
 def main(collection_name=None):
     ScanContext.initialize(mongo_collection_name=collection_name)
     start = time.time()
 
+    create_confident_vulnerable_list()
+
+    #target_sims = []
     target_sims = ["similarity_levenshtein", "similarity_levenshtein_header", "similarity_bag_of_paths", "similarity_radoy_header"]
     for target_sim in target_sims:
         LOGGER.info("Creating Index (if not exists)")
@@ -157,13 +219,13 @@ def main(collection_name=None):
         LOGGER.info("Creating complete histogram")
         create_complete_histogram(target_sim)
         LOGGER.info("Creating cloudflare histogram")
-        create_cloudflare_histogram(target_sim)
+        #create_cloudflare_histogram(target_sim)
         LOGGER.info("Creating fastly histogram")
-        #No fastly data in set
-        create_fastly_histogram(target_sim)
+        #create_fastly_histogram(target_sim)
         LOGGER.info("Creating akamai histogram")
-        #No akamai data in set
-        create_akamai_histogram(target_sim)
+        #create_akamai_histogram(target_sim)
+        LOGGER.info("Creating No-CDN histogram")
+        #create_histogram_without_networks(target_sim)
 
     print(time.time() - start)
 
