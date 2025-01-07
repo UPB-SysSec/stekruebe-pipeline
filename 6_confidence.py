@@ -198,42 +198,79 @@ def calculate_confidence(r):
                     """
 
 
+def calculate_for_edge(ids):
+    i_id, ir_id = ids
+    res = ScanContext.neo4j.execute_query(
+        """
+            MATCH (I)-[IR:SIM { first_color: "WHITE" }]->()
+            WHERE elementId(I) = $i_id
+              AND elementId(IR) = $ir_id 
+            WITH I, IR
+
+            // Collect other_a relations
+            CALL (I) {
+                MATCH (a:HTML)-[A:SIM]-(I)
+                USING INDEX a:HTML(domain)
+                WHERE a.domain = I.domain
+                RETURN COLLECT(A) AS other_a
+            }
+            // Collect a_b relations
+            CALL (I) {
+                MATCH (I)-[B:SIM]->(b:HTML)
+                WHERE b.domain <> I.domain
+                RETURN COLLECT([b.domain, B]) AS a_b
+            }
+            RETURN elementId(IR) AS id, IR, other_a, a_b
+        """,
+        {"i_id": i_id, "ir_id": ir_id},
+    )
+    # TODO DOES NOT USE PURPLE EDGES
+    # TODO BROWN EDGES?
+
+    for r in res.records:
+        # uture = executor.submit(calculate_confidence, r)
+        calculate_confidence(r)
+
+
+def maybe_parallel_imap_unordered(func, iterable, parallel):
+    if parallel:
+        with ProcessPool() as pool:
+            for res in pool.imap_unordered(func, iterable):
+                yield res
+    else:
+        for res in map(func, iterable):
+            yield res
+
+
 def calculate():
     # with ThreadPoolExecutor() as executor:
-    while True:
-        res = ScanContext.neo4j.session().run(
-            """
-                    MATCH (I)-[IR:SIM { first_color: "WHITE" }]->()
-                    WHERE IR.similarity_levenshtein_maxconf_val IS NULL OR
-                        IR.similarity_levenshtein_header_maxconf_val IS NULL OR
-                        IR.similarity_bag_of_paths_maxconf_val IS NULL OR
-                        IR.similarity_radoy_header_maxconf_val IS NULL
-                    WITH I, IR
-                    // Collect other_a relations
-                    CALL (I) {
-                        MATCH (a:HTML)-[A:SIM]-(I)
-                        USING INDEX a:HTML(domain)
-                        WHERE a.domain = I.domain
-                        RETURN COLLECT(A) AS other_a
-                    }
-                    // Collect a_b relations
-                    CALL (I) {
-                        MATCH (I)-[B:SIM]->(b:HTML)
-                        WHERE b.domain <> I.domain
-                        RETURN COLLECT([b.domain, B]) AS a_b
-                    }
-                    RETURN elementId(IR) AS id, IR, other_a, a_b
-                    LIMIT 1000
-                    """,
-            routing_=RoutingControl.READ,
+    for metric in (
+        "similarity_levenshtein",
+        "similarity_levenshtein_header",
+        "similarity_bag_of_paths",
+        "similarity_radoy_header",
+    ):
+        ScanContext.neo4j.execute_query(
+            f"CREATE INDEX sim_{metric}_maxconf_val IF NOT EXISTS FOR ()-[r:SIM]->() ON (r.{metric}_maxconf_val);"
         )
-        # TODO DOES NOT USE PURPLE EDGES
-        # TODO BROWN EDGES?
-        if not res.peek():
-            break
-        for r in res:
-            # uture = executor.submit(calculate_confidence, r)
-            calculate_confidence(r)
+
+    _BASE_QUERY = """
+    MATCH (I)-[IR:SIM { first_color: "WHITE" }]->()
+    WHERE IR.similarity_levenshtein_maxconf_val IS NULL OR
+        IR.similarity_levenshtein_header_maxconf_val IS NULL OR
+        IR.similarity_bag_of_paths_maxconf_val IS NULL OR
+        IR.similarity_radoy_header_maxconf_val IS NULL
+    """
+
+    total = ScanContext.neo4j.execute_query(_BASE_QUERY + " RETURN COUNT(IR) AS total").records[0].get("total")
+    print("Found", total, "edges to compute confidences for")
+
+    with ScanContext.neo4j.session() as session:
+        res = session.run(_BASE_QUERY + "RETURN elementId(I) as i_id,elementId(IR) as ir_id")
+        res = map(lambda x: (x.get("i_id"), x.get("ir_id")), res)
+        progress = tqdm(total=total, smoothing=0.1, mininterval=5, maxinterval=30)
+        for _ in maybe_parallel_imap_unordered(calculate_for_edge, res, True):
+            progress.update()
 
 
 def main():
