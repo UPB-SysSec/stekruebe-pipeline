@@ -56,21 +56,11 @@ LOGGER = logging.getLogger(__name__)
 
 class ScanContext:
     neo4j: Neo4jDriver = None
-    mongo_collection: Collection = None
     resumption_collection: Collection = None
 
     @staticmethod
-    def initialize(mongo_collection_name=None, *, verify_connectivity=True):
+    def initialize(*, verify_connectivity=True):
         ScanContext.neo4j = connect_neo4j(verify_connectivity=verify_connectivity)
-
-        #mongodb = connect_mongo(verify_connectivity=verify_connectivity)
-        #database = mongodb["steckruebe"]
-        #if not mongo_collection_name:
-        #    mongo_collection_name = get_most_recent_collection_name(database, "ticket_redirection_")
-        #    logging.info(f"Using most recent collection: {mongo_collection_name}")
-        #if not mongo_collection_name:
-        #    raise ValueError("Could not determine most recent collection")
-        #ScanContext.mongo_collection = database[mongo_collection_name]
 
 
 def write_transaction(tx, rel_id, metric, domainname, confidence):
@@ -80,18 +70,24 @@ def write_transaction(tx, rel_id, metric, domainname, confidence):
     SET r[$property_name_1] = $property_value_1
     SET r[$property_name_2] = $property_value_2
     """
-    x = tx.run(query, rel_id=rel_id, property_name_1=metric+"_maxconf_domain", property_value_1=domainname, property_name_2=metric+"_maxconf_val", property_value_2=confidence)
+    x = tx.run(
+        query,
+        rel_id=rel_id,
+        property_name_1=metric + "_maxconf_domain",
+        property_value_1=domainname,
+        property_name_2=metric + "_maxconf_val",
+        property_value_2=confidence,
+    )
+
 
 def write_result(rel_id, target_sim, domain, confidence):
-        try:
-            x = ScanContext.neo4j.session().execute_write(
-                write_transaction,
-                rel_id=rel_id,
-                metric=target_sim,
-                domainname=domain,
-                confidence=confidence)
-        except Exception as e:
-            print("Ex", e, type(e))
+    try:
+        x = ScanContext.neo4j.session().execute_write(
+            write_transaction, rel_id=rel_id, metric=target_sim, domainname=domain, confidence=confidence
+        )
+    except Exception as e:
+        print("Ex", e, type(e))
+
 
 def __confidence_statistics(y, resumption_similarity, cdf_x):
     if -2 in y:
@@ -100,14 +96,22 @@ def __confidence_statistics(y, resumption_similarity, cdf_x):
     if n < 2:
         return 0.0
     mean_y = np.mean(y)
-    #error_y_1 = stats.sem(y, nan_policy='propagate') or 1e-12
-    #Mathematical hack so things go wooosh
-    error_y = (np.std(y, ddof=1, mean=mean_y) / np.sqrt(n-1)) or 1e-12
-    z_value_y = abs((resumption_similarity - mean_y) /error_y)
+    # error_y_1 = stats.sem(y, nan_policy='propagate') or 1e-12
+    # Mathematical hack so things go wooosh
+    error_y = (np.std(y, ddof=1, mean=mean_y) / np.sqrt(n - 1)) or 1e-12
+    z_value_y = abs((resumption_similarity - mean_y) / error_y)
     cdf_y = stats.norm.sf(z_value_y)
-    return (cdf_y* 2) - (cdf_x* 2) 
+    return (cdf_y * 2) - (cdf_x * 2)
 
-target_sims = ["similarity_levenshtein", "similarity_levenshtein_header", "similarity_bag_of_paths", "similarity_radoy_header"]
+
+target_sims = [
+    "similarity_levenshtein",
+    "similarity_levenshtein_header",
+    "similarity_bag_of_paths",
+    "similarity_radoy_header",
+]
+
+
 def calculate_confidence(r):
     target_relationship = r.get("IR")
     other_a = r.get("other_a")
@@ -117,7 +121,7 @@ def calculate_confidence(r):
         if target_relationship == "similarity_radoy_header" and resumtionsimilarity == -2:
             write_result(r.get("id"), target_sim, "", 0)
             continue
-        if resumtionsimilarity is None: 
+        if resumtionsimilarity is None:
             write_result(r.get("id"), target_sim, "", "")
             continue
         samesitesimilarities = np.array([r.get(target_sim) for r in other_a if r.get(target_sim) is not None])
@@ -127,14 +131,14 @@ def calculate_confidence(r):
             continue
 
         mean_x = np.mean(samesitesimilarities)
-        error_x = (np.std(samesitesimilarities, ddof=1, mean=mean_x) / np.sqrt(len(samesitesimilarities)-1)) or 1e-12
-        z_value_x = abs((resumtionsimilarity - mean_x) /error_x)
+        error_x = (np.std(samesitesimilarities, ddof=1, mean=mean_x) / np.sqrt(len(samesitesimilarities) - 1)) or 1e-12
+        z_value_x = abs((resumtionsimilarity - mean_x) / error_x)
         cdf_x = stats.norm.sf(z_value_x)
 
-        #-1 indicates strong confidence that we have a.com, +1 indicates strong confidence that we resumed b.com, 0 means we don't know cause it either doesn't match any or both
-        #ab = itertools.groupby(r.get("a_b"), lambda x : x[0])
+        # -1 indicates strong confidence that we have a.com, +1 indicates strong confidence that we resumed b.com, 0 means we don't know cause it either doesn't match any or both
+        # ab = itertools.groupby(r.get("a_b"), lambda x : x[0])
         abc = defaultdict(list)
-        for x in a_b: 
+        for x in a_b:
             val = x[1].get(target_sim)
             if val is not None:
                 abc[x[0]].append(val)
@@ -142,15 +146,15 @@ def calculate_confidence(r):
         if len(abc) == 0:
             write_result(r.get("id"), target_sim, "", "")
             continue
-        
-        
-        confidence_per_domain = [(k, __confidence_statistics(np.array(v), resumtionsimilarity, cdf_x)) for k,v in abc.items()]
-        maximum_confidence = max(confidence_per_domain, key=lambda x : x[1])
 
-        #confidence_per_domain.sort(key=lambda x:x[1], reverse=True)
+        confidence_per_domain = [
+            (k, __confidence_statistics(np.array(v), resumtionsimilarity, cdf_x)) for k, v in abc.items()
+        ]
+        maximum_confidence = max(confidence_per_domain, key=lambda x: x[1])
+
+        # confidence_per_domain.sort(key=lambda x:x[1], reverse=True)
 
         write_result(r.get("id"), target_sim, maximum_confidence[0], float(maximum_confidence[1]))
-        
 
     """
             MATCH (I)-[IR: SIM { first_color: "WHITE" }]-()
@@ -170,7 +174,6 @@ def calculate_confidence(r):
             RETURN elementId(IR) as id, IR, other_a, a_b
             LIMIT 10000
             """
-    
 
     """
     MATCH (I)-[IR: SIM { first_color: "WHITE" }]->()
@@ -194,10 +197,12 @@ def calculate_confidence(r):
                     RETURN elementId(IR) as id, IR, other_a, a_b
                     """
 
+
 def calculate():
-    #with ThreadPoolExecutor() as executor:
-        while True:
-            res = ScanContext.neo4j.session().run("""
+    # with ThreadPoolExecutor() as executor:
+    while True:
+        res = ScanContext.neo4j.session().run(
+            """
                     MATCH (I)-[IR:SIM { first_color: "WHITE" }]->()
                     WHERE IR.similarity_levenshtein_maxconf_val IS NULL OR
                         IR.similarity_levenshtein_header_maxconf_val IS NULL OR
@@ -219,24 +224,26 @@ def calculate():
                     }
                     RETURN elementId(IR) AS id, IR, other_a, a_b
                     LIMIT 1000
-                    """, routing_=RoutingControl.READ)
-                    #TODO DOES NOT USE PURPLE EDGES
-                    #TODO BROWN EDGES?
-            if not res.peek():
-                break
-            for r in res:
-                #uture = executor.submit(calculate_confidence, r)
-                calculate_confidence(r)
+                    """,
+            routing_=RoutingControl.READ,
+        )
+        # TODO DOES NOT USE PURPLE EDGES
+        # TODO BROWN EDGES?
+        if not res.peek():
+            break
+        for r in res:
+            # uture = executor.submit(calculate_confidence, r)
+            calculate_confidence(r)
+
 
 def main():
-    ScanContext.initialize(mongo_collection_name=collection_name)
+    ScanContext.initialize()
     start = time.time()
     calculate()
-    #calculate(collection_name)
 
     print(time.time() - start)
-    
-collection_name = "ticket_redirection_2024-08-19_19:28"
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
