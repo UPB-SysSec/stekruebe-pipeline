@@ -94,6 +94,8 @@ def write_result(rel_id, target_sim, domain, confidence):
             print("Ex", e, type(e))
 
 def __confidence_statistics(y, resumption_similarity, cdf_x):
+    if -2 in y:
+        return 0.0
     n = len(y)
     if n < 2:
         return 0.0
@@ -112,6 +114,9 @@ def calculate_confidence(r):
     a_b = r.get("a_b")
     for target_sim in target_sims:
         resumtionsimilarity = target_relationship.get(target_sim)
+        if target_relationship == "similarity_radoy_header" and resumtionsimilarity == -2:
+            write_result(r.get("id"), target_sim, "", 0)
+            continue
         if resumtionsimilarity is None: 
             write_result(r.get("id"), target_sim, "", "")
             continue
@@ -215,6 +220,8 @@ def calculate():
                     RETURN elementId(IR) AS id, IR, other_a, a_b
                     LIMIT 1000
                     """, routing_=RoutingControl.READ)
+                    #TODO DOES NOT USE PURPLE EDGES
+                    #TODO BROWN EDGES?
             if not res.peek():
                 break
             for r in res:
