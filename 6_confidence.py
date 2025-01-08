@@ -54,6 +54,7 @@ warnings.filterwarnings("ignore", "Degrees of freedom <= 0 for slice")
 warnings.filterwarnings("ignore", "invalid value encountered in scalar divide")
 
 LOGGER = logging.getLogger(__name__)
+CONFIDENCE_VERSION = 2
 
 
 class ScanContext:
@@ -106,7 +107,7 @@ def __confidence_statistics(y, resumption_similarity, cdf_x):
     return (cdf_y * 2) - (cdf_x * 2)
 
 
-target_sims = [
+TARGET_SIMS = [
     "similarity_levenshtein",
     "similarity_levenshtein_header",
     "similarity_bag_of_paths",
@@ -115,18 +116,25 @@ target_sims = [
 
 
 def calculate_confidence(r):
-    target_relationship = r.get("IR")
-    other_a = r.get("other_a")
-    a_b = r.get("a_b")
-    for target_sim in target_sims:
+    target_relationship = r.get("IR")  # white edge
+    other_a = r.get("other_a")  # blue/purple edges
+    a_b = r.get("a_b")  # green edges
+    ScanContext.neo4j.execute_query(
+        "MATCH ()-(IR:SIM)->() WHERE elementId(IR)=$id_ir SET IR.computed_confidences=$version",
+        {
+            "id_ir": target_relationship.get("id"),
+            "version": CONFIDENCE_VERSION,
+        },
+    )
+    for target_sim in TARGET_SIMS:
         resumtionsimilarity = target_relationship.get(target_sim)
-        if target_relationship == "similarity_radoy_header" and resumtionsimilarity == -2:
-            write_result(r.get("id"), target_sim, "", 0)
-            continue
         if resumtionsimilarity is None:
             write_result(r.get("id"), target_sim, "", "")
             continue
-        samesitesimilarities = np.array([r.get(target_sim) for r in other_a if r.get(target_sim) is not None])
+        if target_relationship == "similarity_radoy_header" and resumtionsimilarity == -2:
+            write_result(r.get("id"), target_sim, "", 0)
+            continue
+        samesitesimilarities = np.array([a.get(target_sim) for a in other_a if a.get(target_sim) is not None])
 
         if len(samesitesimilarities) == 0:
             write_result(r.get("id"), target_sim, "", "")
@@ -158,67 +166,27 @@ def calculate_confidence(r):
 
         write_result(r.get("id"), target_sim, maximum_confidence[0], float(maximum_confidence[1]))
 
-    """
-            MATCH (I)-[IR: SIM { first_color: "WHITE" }]-()
-            WITH I, IR,
-                COLLECT { 
-                    MATCH (a)-[A:SIM]-(I)
-                    WHERE a.domain = I.domain
-                    AND A[$sim_typ] IS NOT NULL
-                    RETURN A[$sim_typ]
-                } as other_a,
-                COLLECT {
-                    MATCH (I)-[B: SIM]-(b)
-                    WHERE b.domain <> I.domain
-                    AND B[$sim_typ] IS NOT NULL
-                    RETURN [b.domain, B[$sim_typ]]
-                } as a_b
-            RETURN elementId(IR) as id, IR, other_a, a_b
-            LIMIT 10000
-            """
-
-    """
-    MATCH (I)-[IR: SIM { first_color: "WHITE" }]->()
-                    WHERE IR.similarity_levenshtein_maxconf_val is NULL OR
-                        IR.similarity_levenshtein_header_maxconf_val is NULL OR
-                        IR.similarity_bag_of_paths_maxconf_val is NULL OR
-                        IR.similarity_radoy_header_maxconf_val is NULL
-                    WITH I, IR,
-                        COLLECT { 
-                            MATCH (a:HTML)-[A:SIM]-(I)
-                            USING INDEX a:HTML (domain)
-                            WHERE a.domain = I.domain
-                            RETURN A
-                        } as other_a,
-                        COLLECT {
-                            MATCH (I)-[B: SIM]->(b)
-                            WHERE b.domain <> I.domain
-                            RETURN [b.domain, B]
-                        } as a_b
-                    LIMIT 1000
-                    RETURN elementId(IR) as id, IR, other_a, a_b
-                    """
-
 
 def calculate_for_edge(ids):
     i_id, ir_id = ids
     res = ScanContext.neo4j.execute_query(
         """
-            MATCH (I)-[IR:SIM { first_color: "WHITE" }]->()
+            MATCH (I)-[IR:SIM]-()
             WHERE elementId(I) = $i_id
               AND elementId(IR) = $ir_id 
             WITH I, IR
 
             // Collect other_a relations
             CALL (I) {
-                MATCH (a:HTML)-[A:SIM]-(I)
-                USING INDEX a:HTML(domain)
+                MATCH (a:INITIAL_HTML)-[A:SIM]-(b:INITIAL_HTML)
+                USING INDEX a:INITIAL_HTML(domain)
                 WHERE a.domain = I.domain
+                  AND b.domain = I.domain
                 RETURN COLLECT(A) AS other_a
             }
             // Collect a_b relations
             CALL (I) {
-                MATCH (I)-[B:SIM]->(b:HTML)
+                MATCH (I)-[B:SIM]-(b:HTML)
                 WHERE b.domain <> I.domain
                 RETURN COLLECT([b.domain, B]) AS a_b
             }
@@ -226,8 +194,6 @@ def calculate_for_edge(ids):
         """,
         {"i_id": i_id, "ir_id": ir_id},
     )
-    # TODO DOES NOT USE PURPLE EDGES
-    # TODO BROWN EDGES?
 
     for r in res.records:
         # uture = executor.submit(calculate_confidence, r)
@@ -255,14 +221,20 @@ def calculate():
         ScanContext.neo4j.execute_query(
             f"CREATE INDEX sim_{metric}_maxconf_val IF NOT EXISTS FOR ()-[r:SIM]->() ON (r.{metric}_maxconf_val);"
         )
+    ScanContext.neo4j.execute_query(
+        f"CREATE INDEX sim_computed_confidences IF NOT EXISTS FOR ()-[r:SIM]->() ON (r.computed_confidences);"
+    )
 
-    _BASE_QUERY = """
-    MATCH (I)-[IR:SIM { first_color: "WHITE" }]->()
-    WHERE IR.similarity_levenshtein_maxconf_val IS NULL OR
-        IR.similarity_levenshtein_header_maxconf_val IS NULL OR
-        IR.similarity_bag_of_paths_maxconf_val IS NULL OR
-        IR.similarity_radoy_header_maxconf_val IS NULL
+    assert isinstance(CONFIDENCE_VERSION, int)
+    _BASE_QUERY = (
+        """
+    MATCH (I:INITIAL_HTML)-[IR:SIM { first_color: "WHITE" }]-()
+    WHERE IR.computed_confidences IS NULL
+       OR IR.computed_confidences<"""
+        + str(CONFIDENCE_VERSION)
+        + """
     """
+    )
 
     total = ScanContext.neo4j.execute_query(_BASE_QUERY + " RETURN COUNT(IR) AS total").records[0].get("total")
     print("Found", total, "edges to compute confidences for")
