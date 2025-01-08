@@ -50,6 +50,8 @@ from random import randint
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
+warnings.filterwarnings("ignore", "Degrees of freedom <= 0 for slice")
+warnings.filterwarnings("ignore", "invalid value encountered in scalar divide")
 
 LOGGER = logging.getLogger(__name__)
 
@@ -288,6 +290,7 @@ if __name__ == "__main__":
         stream=sys.stdout,
     )
     logging.getLogger("neo4j").setLevel(logging.WARNING)
+    logging.getLogger("neo4j.pool").setLevel(logging.ERROR)
     logging.getLogger("pymongo").setLevel(logging.WARNING)
     try:
         main()
