@@ -115,29 +115,29 @@ TARGET_SIMS = [
 ]
 
 
-def calculate_confidence(r):
+def calculate_confidence(r, ir_id):
     target_relationship = r.get("IR")  # white edge
     other_a = r.get("other_a")  # blue/purple edges
     a_b = r.get("a_b")  # green edges
     ScanContext.neo4j.execute_query(
-        "MATCH ()-(IR:SIM)->() WHERE elementId(IR)=$id_ir SET IR.computed_confidences=$version",
+        "MATCH ()-[IR:SIM]->() WHERE elementId(IR)=$ir_id SET IR.computed_confidences=$version",
         {
-            "id_ir": target_relationship.get("id"),
+            "ir_id": ir_id,
             "version": CONFIDENCE_VERSION,
         },
     )
     for target_sim in TARGET_SIMS:
         resumtionsimilarity = target_relationship.get(target_sim)
         if resumtionsimilarity is None:
-            write_result(r.get("id"), target_sim, "", "")
+            write_result(ir_id, target_sim, "", "")
             continue
         if target_relationship == "similarity_radoy_header" and resumtionsimilarity == -2:
-            write_result(r.get("id"), target_sim, "", 0)
+            write_result(ir_id, target_sim, "", 0)
             continue
         samesitesimilarities = np.array([a.get(target_sim) for a in other_a if a.get(target_sim) is not None])
 
         if len(samesitesimilarities) == 0:
-            write_result(r.get("id"), target_sim, "", "")
+            write_result(ir_id, target_sim, "", "")
             continue
 
         mean_x = np.mean(samesitesimilarities)
@@ -190,14 +190,14 @@ def calculate_for_edge(ids):
                 WHERE b.domain <> I.domain
                 RETURN COLLECT([b.domain, B]) AS a_b
             }
-            RETURN elementId(IR) AS id, IR, other_a, a_b
+            RETURN IR, other_a, a_b
         """,
         {"i_id": i_id, "ir_id": ir_id},
     )
 
     for r in res.records:
         # uture = executor.submit(calculate_confidence, r)
-        calculate_confidence(r)
+        calculate_confidence(r, ir_id)
 
 
 def maybe_parallel_imap_unordered(func, iterable, parallel):
@@ -242,7 +242,7 @@ def calculate():
     with ScanContext.neo4j.session() as session:
         res = session.run(_BASE_QUERY + "RETURN elementId(I) as i_id,elementId(IR) as ir_id")
         res = map(lambda x: (x.get("i_id"), x.get("ir_id")), res)
-        progress = tqdm(total=total, smoothing=0.1, mininterval=5, maxinterval=30)
+        progress = tqdm(total=total, smoothing=0.1, mininterval=5, maxinterval=30, dynamic_ncols=True)
         for _ in maybe_parallel_imap_unordered(calculate_for_edge, res, True):
             progress.update()
 
