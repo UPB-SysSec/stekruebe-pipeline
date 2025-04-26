@@ -13,6 +13,8 @@ trie.pickle
 .venv/
 venv/
 .idea/
+analysisdump/
+analysisdump_*/
 
 neo4jdata/
 htmlneo4jdata/
