@@ -19,7 +19,8 @@ import_from_path("utils", Path(__file__).parent.parent / "utils" / "__init__.py"
 import utils.db
 
 
-mongo_collection = utils.db.connect_mongo()["steckruebe"]["ticket_redirection_2024-08-19_19:28"]
+mongo_collection = utils.db.connect_mongo()["steckruebe"]["ticket_redirection_2024-12-13_17:41"]
+# ["ticket_redirection_2024-08-19_19:28"]
 
 
 app = Flask(__name__)
