@@ -18,6 +18,8 @@ from typing import Any, Generic, TypeVar
 
 from utils import JsonFilter
 from utils import json_serialization as json
+from urllib.parse import urlparse
+
 
 
 class FileFormat(Enum):
@@ -209,7 +211,13 @@ class ZDNS(SimpleSubprocessStage):
 
     def run_stage(self, input_string_list: list[str] = None) -> list[str]:
         start = time.time()
-        ret = super().run_stage(input_string_list)
+
+        # sometimes name servers apparently return wacky stuff and we don't want ZDNS to error out
+        filtered_input_string_list = [ln for ln in input_string_list if "," not in ln and " " not in ln]
+        self.logger.warning(f"Filtered out {len(filtered_input_string_list) - len(input_string_list)} non-URLs")
+
+
+        ret = super().run_stage(filtered_input_string_list)
         end = time.time()
         self._store_stat("zdns runtime", end - start)
 
@@ -815,6 +823,8 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
         # TODO store new domains in a file
         if not unique_domains:
             break
+        with open(f"out/new_domains_{RUN_ID}.txt", "w") as f:
+            f.write("\n".join(unique_domains))
         resolved_hosts = STAGES.ZDNS(
             input_string_list=unique_domains,
             cache_file=FILES.get("RESOLVED_DOMAINS", RUN_ID),
