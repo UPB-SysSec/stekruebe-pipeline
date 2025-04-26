@@ -1,3 +1,4 @@
+import sys
 import time
 from tqdm import tqdm
 import logging as logging
@@ -57,6 +58,10 @@ def create_indices():
         ScanContext.neo4j.execute_query(
             f"CREATE INDEX node_domain_index_{typ.lower()} IF NOT EXISTS FOR (n:{typ}) ON (n.domain);"
         )
+
+    ScanContext.neo4j.execute_query(
+        f"CREATE INDEX edge_white_domain_index IF NOT EXISTS FOR ()-[r:WHITE]->() ON (r.domain);"
+    )
     # create index on edge classification
     ScanContext.neo4j.execute_query(
         "CREATE INDEX edge_classification_index IF NOT EXISTS FOR ()-[r:RESUMED_AT]->() ON (r.classification);"
@@ -66,6 +71,10 @@ def create_indices():
         "CREATE INDEX edge_reason_index IF NOT EXISTS FOR ()-[r:RESUMED_AT]->() ON (r.reason);"
     )
     # SIM analyzed
+
+    ScanContext.neo4j.execute_query(
+        "CREATE INDEX edge_white_processed IF NOT EXISTS FOR ()-[r:WHITE]->() ON (r.processed);"
+    )
     ScanContext.neo4j.execute_query(
         "CREATE INDEX edge_similarity_analyzed IF NOT EXISTS FOR ()-[r:SIM]->() ON (r.analyzed);"
     )
@@ -129,6 +138,18 @@ def _execute_query(cypher, params=None, *ret_var: str):
 
 def execute_query(cypher, params=None, *ret_var: str):
     return list(_execute_query(cypher, params, *ret_var))
+
+
+def execute_query_retry(cypher, params=None, tries=10):
+    last_exc = None
+    for attempt in range(1, tries + 1):
+        try:
+            return execute_query(cypher, params)
+        except Exception as e:
+            last_exc = e
+            LOGGER.exception(f"Error during query execution; attempt {attempt}/{tries}")
+            time.sleep(5)
+    raise RuntimeError(f"Failed to execute query after {tries} attempts", last_exc)
 
 
 @dataclass
@@ -219,6 +240,24 @@ else:
 
 
 def build_edges_for_domain(initial_domain: str):
+    try:
+        return _build_edges_for_domain(initial_domain)
+    except Exception:
+        LOGGER.exception(f"Error while processing of domain {initial_domain}")
+        raise
+
+
+def batch(all_items: list | set, batch_size):
+    if batch_size is None:
+        yield all_items
+        return
+    if isinstance(all_items, set):
+        all_items = list(all_items)
+    for i in range(0, len(all_items), batch_size):
+        yield all_items[i : i + batch_size]
+
+
+def _build_edges_for_domain(initial_domain: str):
     stats = StatsCapture()
     with stats.QUERY_TIME_RESUMPTIONS as _:
         resumptions = execute_query(
@@ -233,11 +272,12 @@ def build_edges_for_domain(initial_domain: str):
             for x in execute_query("MATCH (i:INITIAL_HTML {domain: $domain}) RETURN i", {"domain": initial_domain}, "i")
         }
     with stats.MERGE_TIME_PURPLE as _:
-        execute_query(
+        execute_query_retry(
             """
             MATCH (initial_related1: INITIAL_HTML), (initial_related2: INITIAL_HTML)
             WHERE elementId(initial_related1) in $initial_related_nodes
                 AND elementId(initial_related2) in $initial_related_nodes
+                AND elementId(initial_related1) < elementId(initial_related2)
                 AND initial_related1 <> initial_related2
             MERGE (initial_related1)-[:PURPLE]->(initial_related2)
             """,
@@ -289,42 +329,52 @@ def build_edges_for_domain(initial_domain: str):
             initial_related.remove(initial.element_id)
 
         with stats.MERGE_TIME_BLACK_BLUE as _:
-            execute_query(
-                """
-                MATCH (initial: INITIAL_HTML), (redirect: REDIRECT_HTML), (related_node: INITIAL_HTML)
-                WHERE elementId(initial)=$initial AND elementId(redirect)=$redirect AND elementId(related_node) in $related_nodes
-                MERGE (redirect)-[:BLACK]->(related_node)
-                WITH initial, related_node
-                WHERE initial <> related_node
-                MERGE (initial)-[:BLUE]->(related_node)
-                """,
-                {
-                    "initial": initial.element_id,
-                    "redirect": redirect.element_id,
-                    "related_nodes": initial_related | nodes_related_to_redirect,
-                },
-            )
+            for related_nodes_batch in batch(initial_related | nodes_related_to_redirect, None):
+                execute_query_retry(
+                    """
+                    MATCH (initial: INITIAL_HTML), (redirect: REDIRECT_HTML), (related_node: INITIAL_HTML)
+                    WHERE elementId(initial)=$initial AND elementId(redirect)=$redirect AND elementId(related_node) in $related_nodes
+                    CREATE (redirect)-[:BLACK]->(related_node)
+                    WITH initial, related_node
+                    WHERE initial <> related_node
+                    CREATE (initial)-[:BLUE]->(related_node)
+                    """,
+                    {
+                        "initial": initial.element_id,
+                        "redirect": redirect.element_id,
+                        "related_nodes": related_nodes_batch,
+                    },
+                )
 
         with stats.MERGE_TIME_YELLOW as _:
-            execute_query(
-                """
-                MATCH (initial_related: INITIAL_HTML), (redirect_related: INITIAL_HTML)
-                WHERE elementId(initial_related) in $initial_related_nodes
-                    AND elementId(redirect_related) in $redirect_related_nodes
-                    AND initial_related <> redirect_related
-                MERGE (initial_related)-[:YELLOW]->(redirect_related)
-                """,
-                {
-                    "initial_related_nodes": initial_related,
-                    "redirect_related_nodes": nodes_related_to_redirect,
-                },
-            )
+            for initial_related_batch in batch(initial_related, None):
+                for nodes_related_to_redirect_batch in batch(nodes_related_to_redirect, None):
+                    execute_query_retry(
+                        """
+                        MATCH (initial_related: INITIAL_HTML), (redirect_related: INITIAL_HTML)
+                        WHERE elementId(initial_related) in $initial_related_nodes
+                            AND elementId(redirect_related) in $redirect_related_nodes
+                            AND initial_related <> redirect_related
+                        CREATE (initial_related)-[:YELLOW]->(redirect_related)
+                        """,
+                        {
+                            "initial_related_nodes": initial_related_batch,
+                            "redirect_related_nodes": nodes_related_to_redirect_batch,
+                        },
+                    )
+    execute_query(
+        """
+            MATCH ()-[r:WHITE {domain: $domain}]->()
+            SET r.processed = true
+        """,
+        {"domain": initial_domain},
+    )
     return stats.finalize()
 
 
 def maybe_parallel_imap_unordered(func, iterable, parallel):
     if parallel:
-        with ProcessPool(32) as pool:
+        with ProcessPool() as pool:
             for res in pool.imap_unordered(func, iterable):
                 yield res
     else:
@@ -339,19 +389,19 @@ def build_colored_edges(parallel=True):
         MATCH (initial:INITIAL_HTML)-[:RESUMED_AT {classification: 'LOOK_AT_METRICS'}]->(redirect:REDIRECT_HTML)
         RETURN initial, redirect
         """,
-        "MERGE (initial)-[:WHITE]->(redirect)",
+        "MERGE (initial)-[r:WHITE {domain: initial.domain}]->(redirect) ON CREATE SET r.processed=false",
         10000,
     )
     LOGGER.info(f"Created {res.records[0]['updateStatistics']['relationshipsCreated']:,} new white relationships")
 
     res = ScanContext.neo4j.execute_query(
         """
-    MATCH (x:INITIAL_HTML)-[:WHITE]-(redirect:REDIRECT_HTML)
-    RETURN DISTINCT x.domain as domain
+    MATCH ()-[r:WHITE {processed: false}]-()
+    RETURN DISTINCT r.domain as domain
     """
     )
     WHITE_redirect_domains: list[str] = [x["domain"] for x in res.records]
-    LOGGER.info(f"Found {len(WHITE_redirect_domains):,} white redirect domains")
+    LOGGER.info(f"Found {len(WHITE_redirect_domains):,} unprocessed white redirect domains")
 
     progress = tqdm(total=len(WHITE_redirect_domains), smoothing=0.1, mininterval=5, maxinterval=30)
     if CAPTURE_PERF_STATS:
@@ -410,7 +460,9 @@ def build_edges():
     start = time.time()
     while time.time() - start < 30:
         try:
-            ScanContext.neo4j = connect_neo4j(verify_connectivity=True)
+            ScanContext.neo4j = connect_neo4j(
+                verify_connectivity=True, max_transaction_retry_time=60 * 2, retry_delay_multiplier=1.2
+            )
             print("connected")
             break
         except:
@@ -435,7 +487,11 @@ def main(collection_name=None, collection_filter=None, LIMIT=None):
     logging.getLogger("neo4j").setLevel(logging.WARNING)
     ScanContext.initialize(mongo_collection_name=collection_name)
     LOGGER.info(f"Analyzing collection {ScanContext.mongo_collection.full_name}")
-    build_edges()
+    try:
+        build_edges()
+    except:
+        LOGGER.exception("An error occurred")
+        raise
     LOGGER.info("[#] Done")
 
 

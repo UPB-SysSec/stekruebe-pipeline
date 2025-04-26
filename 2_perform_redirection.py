@@ -14,6 +14,7 @@ from multiprocessing.pool import ThreadPool
 from pymongo.collection import Collection
 from threading import Thread
 import inspect
+import sys
 import traceback
 from utils import JsonFilter
 from utils.botp import BagOfTreePaths, BagOfXPaths

@@ -310,7 +310,7 @@ def main(collection_name=None):
         "BLACK",
         "BLUE",
         "PURPLE",
-        "YELLOW",
+        # "YELLOW",
     ):
         evaluate_sim_edges(color)
 
