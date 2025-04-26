@@ -78,6 +78,11 @@ async function initGraph() {
             IR.linkDistance = 200;
             addNonDuplicate(I, I.elementId, pushedNodeIds, GraphData.nodes);
             addNonDuplicate(R, R.elementId, pushedNodeIds, GraphData.nodes);
+            // fix IR direction
+            if (IR.startNodeElementId == R.elementId) {
+                IR.startNodeElementId = I.elementId;
+                IR.endNodeElementId = R.elementId;
+            }
             addNonDuplicate(IR, IR.elementId, pushedRelationIds, GraphData.links);
         }
         // explore surrounding nodes

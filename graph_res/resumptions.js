@@ -78,27 +78,33 @@ async function load_data() {
 
     let table = document.getElementById("resumptions_table");
 
-    results = await neo4jSession.run(`
+    let query = `
         MATCH (I)-[IR: SIM { first_color: "WHITE" }]-(R:REDIRECT_HTML)
-                WHERE IR[$sim_typ] < 0.1
+                WHERE IR.${similarity_prop} < 0.1
                 WITH I, IR, R,
                     COLLECT { 
                         MATCH (a)-[A:SIM]-(I)
-                        WHERE A[$sim_typ] > 0.9 AND a<>R
+                        WHERE A.${similarity_prop} > 0.9
+                          AND a<>R
                         RETURN[a, A]
-                        ORDER BY A[$sim_typ] DESC
+                        ORDER BY A.${similarity_prop} DESC
                     } as other_a,
                     COLLECT {
                         MATCH (R)-[B: SIM]-(b)
-                        WHERE I.domain <> b.domain
-                        AND B[$sim_typ] > 0.9
+                        WHERE B.${similarity_prop} > 0.9
+                          AND I.domain <> b.domain
+                          AND I.cert_fingerprint <> b.cert_fingerprint
                         RETURN[b, B]
-                        ORDER BY B[$sim_typ] DESC
+                        ORDER BY B.${similarity_prop} DESC
                     } as other_b
                 WHERE size(other_b) > 0
                 RETURN I, IR, R, other_a, other_b
-                LIMIT 100
-        `, { sim_typ: similarity_prop })
+                ORDER BY other_b[0][0].ip ASC
+                LIMIT 1000
+        `;
+    console.log(query);
+    results = await neo4jSession.run(query);
+    console.log(`Got ${results.records.length} results`);
     for (let record of results.records) {
         let I = record.get("I");
         let IR = record.get("IR");

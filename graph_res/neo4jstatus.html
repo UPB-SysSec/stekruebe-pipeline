@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+
+<head>
+    <style>
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            background-color: white;
+        }
+
+        .flex-container {
+            display: flex;
+            flex-direction: column;
+            flex-grow: 1;
+        }
+
+        #head {
+            flex-shrink: 0;
+        }
+
+        #graph {
+            flex-grow: 1;
+            overflow: hidden;
+        }
+    </style>
+</head>
+
+<body class="flex-container">
+
+    <div id="head">
+        <form id="loginform">
+            Password: <input type="password" name="password" id="password">
+            <input type="submit" value="Login/Refresh">
+            <i id="loginfeedback"></i>
+        </form>
+        <input type="checkbox" id="autoupdate" checked="true">
+        <label for="autoupdate">Auto-update</label>
+    </div>
+
+    <div id="graph"></div>
+    <script src="./common.js"></script>
+    <script src="./neo4jstatus.js"></script>
+</body>
