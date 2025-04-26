@@ -5,7 +5,7 @@ cd "$(dirname $0)"
 
 # https://neo4j.com/docs/operations-manual/current/docker/ref-settings/
 # values from
-# docker run -it --rm neo4j:5.13.0 neo4j-admin server memory-recommendation --memory=16G
+# docker run -it --rm neo4j:5.25.1 neo4j-admin server memory-recommendation --memory=24G
 
 exist=$(docker ps -q -f "name=steckruebe-html-database")
 if [ -n "$exist" ]; then
@@ -19,9 +19,9 @@ docker run \
 	-v "$(pwd)"/htmlneo4jdata:/data \
 	--env NEO4J_AUTH='neo4j/IJj5fyYpeeWdvAXsxwuJuqlGQxZNDhLf' \
 	--env NEO4J_PLUGINS=\[\"apoc\"\] \
-	--env NEO4J_server_memory_heap_initial__size=5g \
-	--env NEO4J_server_memory_heap_max__size=5g \
-	--env NEO4J_server_memory_pagecache_size=7g \
+	--env NEO4J_server_memory_heap_initial__size=8g \
+	--env NEO4J_server_memory_heap_max__size=8g \
+	--env NEO4J_server_memory_pagecache_size=10g \
 	--env NEO4J_server_jvm_additional=-XX:+ExitOnOutOfMemoryError \
 	--env NEO4J_server_bolt_thread__pool__max__size=400 \
 	--env NEO4J_server_http_advertised__address=syssec-scanner6.cs.upb.de:8443 \
