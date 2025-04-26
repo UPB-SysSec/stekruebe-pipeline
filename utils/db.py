@@ -112,10 +112,10 @@ def connect_mongo(creds=..., url=..., verify_connectivity=True) -> _MongoClient:
     return mongo_driver
 
 
-def connect_neo4j(creds=..., verify_connectivity=True) -> _neo4j_Driver:
+def connect_neo4j(creds=..., verify_connectivity=True, **kwargs) -> _neo4j_Driver:
     if creds is ...:
         creds = credentials.neo4j_creds
-    neo4j_driver = Neo4j("bolt://localhost:7687", auth=creds.as_tuple())
+    neo4j_driver = Neo4j("bolt://localhost:7687", auth=creds.as_tuple(), **kwargs)
     if verify_connectivity:
         neo4j_driver.verify_connectivity()
     return neo4j_driver

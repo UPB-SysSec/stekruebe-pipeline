@@ -20,13 +20,17 @@ class BagOfTreePaths:
                 return
             if node.name:
                 path.append(node.name)
-            if not node.findChildren():
+            children = node.findChildren(recursive=False)
+            if not children:
                 paths.append("/".join(path))
-            for child in node.findChildren(recursive=False):
+            for child in children:
                 traverse(child, path.copy())
 
         # Start from the root (usually the <body> tag in an HTML document)
-        traverse(self.soup.html, [])
+        try:
+            traverse(self.soup.html, [])
+        except RecursionError:
+            print("Warning: Recursion limit reached while extracting bag of tree paths.")
         return Counter(paths)  # A multiset (bag) of paths
 
     def similarity(self, other_botp, frequencies=False):
@@ -81,7 +85,10 @@ class BagOfXPaths:
                 traverse(child, path.copy())
 
         # Start from the root element (usually <html>)
-        traverse(self.soup.body, [])
+        try:
+            traverse(self.soup.body, [])
+        except RecursionError:
+            print("Warning: Recursion limit reached while extracting XPaths.")
         return Counter(xpaths)  # A multiset (bag) of XPaths
 
     def similarity(self, other_boxp, frequencies=False):
