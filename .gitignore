@@ -20,3 +20,10 @@ neo4jdata/
 htmlneo4jdata/
 neo4jdata.bak/
 figures/
+
+# AE
+zcrypto_tls13/
+zdns/
+zgrab2_tls13/
+zmap/
+zmapv6/

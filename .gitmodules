@@ -1,0 +1,3 @@
+[submodule "ae-dummy-servers"]
+	path = ae-dummy-servers
+	url = ssh://irb-git@git.cs.uni-paderborn.de:2222/syssec/projects/steckruebe/ae-dummy-servers.git

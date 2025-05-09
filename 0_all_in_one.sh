@@ -23,7 +23,8 @@ docker stop steckruebe-prefix-database || true
 echo "[#] Gathering Tickets"
 
 date "+%s: %c"
-python3 1_gather_tickets.py ../tranco_V9V2N.csv 1000000
+# python3 1_gather_tickets.py ../tranco_V9V2N.csv 1000000
+python3 1_gather_tickets.py domains.txt
 date "+%s: %c"
 
 cat out/7_merged_zgrab.r*.json > out/7_merged_zgrab_all.json

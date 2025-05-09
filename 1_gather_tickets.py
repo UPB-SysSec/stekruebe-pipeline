@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import os.path as op
 import subprocess
+import shutil
 import sys
 import threading
 import time
@@ -282,6 +283,7 @@ class ZMAP4(SimpleSubprocessStage):
                     self.logger.warning(f"Allowlist {allowlist} is empty. Skipping.")
                     return []
 
+        print(f"Zmap4 invoked with {self.args}")
         start = time.time()
         ret = super().run_stage()
         end = time.time()
@@ -484,6 +486,7 @@ class ZgrabRunner(Stage[int]):
             last_t = now
             last_n = processed_items
 
+        print("Running:", self.executable, *self.args)
         with (
             open(self.output_file, "w") if self.output_file else open(os.devnull, "w") as fo,
             multiprocessing.Pool(self.processing_procs) as pool,
@@ -537,7 +540,7 @@ class ZgrabRunner(Stage[int]):
             stderr += proc.stderr.read()
 
         if returncode:
-            raise subprocess.CalledProcessError(self.returncode, self.args, self.stdout, self.stderr)
+            raise subprocess.CalledProcessError(proc.returncode, self.args, proc.stdout, proc.stderr)
         self.logger.info(f"Zgrab Output: {stderr!r}")
         status_line = stderr.decode().strip().split("\n")[-1]
         status = json.loads(status_line)
@@ -693,10 +696,10 @@ class CONST:
 class EXEUTABLES:
     JQ = "jq"
     CUT = "cut"
-    ZDNS = "/data/home/steckruebe/workspace/zdns/zdns"  # use zdns 1.1.0
-    ZMAP4 = "zmap"
-    ZMAP6 = "zmapv6"
-    ZGRAB = "zgrab2_tls13"
+    ZDNS = "./zdns/zdns"
+    ZMAP4 = "./zmap/src/zmap"
+    ZMAP6 = "./zmapv6/src/zmap"
+    ZGRAB = "./zgrab2_tls13/zgrab2"
 
 
 if not op.isdir("out"):
@@ -705,8 +708,8 @@ if not op.isdir("out"):
 
 class FILES:
     TRANCO = "../tranco_G6KVK.csv"
-    BLOCKLIST_4 = "/data/Crawling-Blacklist/blacklist.txt"
-    BLOCKLIST_6 = "/data/Crawling-Blacklist/blacklist-ipv6.txt"
+    BLOCKLIST_4 = "blocklist.txt" # not needed for AE Version
+    BLOCKLIST_6 = "blocklist.txt" # not needed for AE Version
 
     RESOLVED_DOMAINS = "out/0_resolved.json"
 
@@ -754,6 +757,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             "alookup",
             "--ipv4-lookup",
             "--ipv6-lookup",
+            "--name-servers=127.0.0.1:5353", # AE version
             cache_as_format=FileFormat.TXT,
         )
         DUPLICATE_DOMAINS = DuplicateDomainFilter(stats)
@@ -778,8 +782,6 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             EXEUTABLES.ZMAP4,
             "-b",
             str(FILES.get("BLOCKLIST_4")),
-            "-p",
-            "443",
             "-w",
             str(FILES.get("FILTERED_4_IPLIST")),  # this changes on each run
         )
@@ -788,8 +790,6 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             EXEUTABLES.ZMAP6,
             "-M",
             "ipv6_tcp_synscan",
-            "-p",
-            "443",
             "--ipv6-source-ip",
             CONST.IPv6SRC,
             "--ipv6-target-file",
@@ -837,16 +837,17 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
         IPv4s = STAGES.BLOCKLIST4(IPv4s, cache_file=FILES.get("FILTERED_4_IPLIST", RUN_ID))
         IPv6s = STAGES.BLOCKLIST6(IPv6s, cache_file=FILES.get("FILTERED_6_IPLIST", RUN_ID))
 
-        IPv4s = STAGES.ZMAP4(
-            allowlist=FILES.get("FILTERED_4_IPLIST", RUN_ID),
-            cache_file=FILES.get("HTTPS_4_IPLIST", RUN_ID),
-            dry_run=DRY_RUN,
-        )
-        IPv6s = STAGES.ZMAP6(
-            targets=FILES.get("FILTERED_6_IPLIST", RUN_ID),
-            cache_file=FILES.get("HTTPS_6_IPLIST", RUN_ID),
-            dry_run=DRY_RUN,
-        )
+        # AE Version, our Docker containers will be reachable, and zmap does not love using the local docker bridge
+        # IPv4s = STAGES.ZMAP4(
+        #     allowlist=FILES.get("FILTERED_4_IPLIST", RUN_ID),
+        #     cache_file=FILES.get("HTTPS_4_IPLIST", RUN_ID),
+        #     dry_run=DRY_RUN,
+        # )
+        # IPv6s = STAGES.ZMAP6(
+        #     targets=FILES.get("FILTERED_6_IPLIST", RUN_ID),
+        #     cache_file=FILES.get("HTTPS_6_IPLIST", RUN_ID),
+        #     dry_run=DRY_RUN,
+        # )
 
         IPs = STAGES.MERGE_UNIQ(IPv4s, IPv6s, cache_file=FILES.get("MERGED_IP_LIST", RUN_ID))
         del IPv4s, IPv6s
@@ -983,6 +984,16 @@ if __name__ == "__main__":
         n_lines = int(sys.argv[2])
     # main(10, False)
     # # main(None, None)
+
+    # AE Version
+    for executable in [EXEUTABLES.JQ, EXEUTABLES.CUT, EXEUTABLES.ZDNS, EXEUTABLES.ZMAP4, EXEUTABLES.ZMAP6, EXEUTABLES.ZGRAB]:
+        if shutil.which(executable) or os.path.isfile(executable):
+            logging.getLogger("Requirements").info(f"{executable} exists and is executable.")
+            pass
+        else:
+            logging.getLogger("Requirements").fatal(f"{executable} does not exist or is not executable.")
+            exit(1)
+
     main(n_lines)
     # test_zdns()
     # test_zgrab()
