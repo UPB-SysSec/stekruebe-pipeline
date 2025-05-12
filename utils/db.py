@@ -104,7 +104,9 @@ def connect_mongo(creds=..., url=..., verify_connectivity=True) -> _MongoClient:
     if creds is ...:
         creds = credentials.mongodb_creds
     if url is ...:
-        url = f"mongodb://{creds.as_str()}@127.0.0.1:27017/?authSource=admin&readPreference=primary&directConnection=true&ssl=true"
+        # url = f"mongodb://{creds.as_str()}@127.0.0.1:27017/?authSource=admin&readPreference=primary&directConnection=true&ssl=true"
+        # AE Version
+        url = f"mongodb://{creds.as_str()}@127.0.0.1:27017/?authSource=admin&readPreference=primary&directConnection=true"
 
     mongo_driver = MongoDB(url, tlsAllowInvalidCertificates=True)
     if verify_connectivity:

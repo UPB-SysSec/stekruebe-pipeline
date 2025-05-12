@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-__ASN_IP_DIR = Path(__file__).parent.parent.parent / "asn-ip" / "as"
+__ASN_IP_DIR = Path(__file__).parent.parent / "asn-ip" / "as"
 
 
 @dataclass(frozen=True, slots=True)

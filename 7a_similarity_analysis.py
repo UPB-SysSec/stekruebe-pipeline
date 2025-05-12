@@ -121,7 +121,7 @@ def matches_known_good_pattern(doc):
         "<html><head><title>Request Rejected</title></head><body>The requested URL was rejected. Please consult with your administrator.<br><br>Your support ID is: "
     ):
         return True
-    
+
     # Google misrouting
     if doc.startswith("response 404 (backend NotFound), service rules for the path non-existent"):
         return True
@@ -143,7 +143,7 @@ def dump_row(target_sim, row):
     target_path = f"analysisdump/{cdn_name}/{dstip}/{srcip}"
     initial_resumption_relation = row.get("IR")
     resumption_origin_relation = row.get("RO")
-    
+
     initial = get_body(ObjectId(initial_node.get("doc_id")))
     assert initial_node.get("doc_id") == resumption_node.get("doc_id")
     resumed = get_body(
@@ -153,8 +153,8 @@ def dump_row(target_sim, row):
     total_by_cdn[cdn_name].append(f"{srcip}->{dstip}")
     total_by_as[f"{ip_to_asn(srcip)} to {ip_to_asn(dstip)}"].append(f"{srcip}->{dstip}")
 
-    
-    return
+
+    # return
 
     if matches_known_good_pattern(resumed):
         return
@@ -191,7 +191,8 @@ def dump_row(target_sim, row):
 
 
 def main():
-    ScanContext.initialize(mongo_collection_name="ticket_redirection_2024-12-13_17:41")
+    # ScanContext.initialize(mongo_collection_name="ticket_redirection_2025-05-12_12:45")
+    ScanContext.initialize(mongo_collection_name=None)
 
     cutoff_IR, cutoff_OR = 0.6, 0.9
 
@@ -227,7 +228,7 @@ def main():
             print(k,";", len(set(v)))
     dict_to_out(total_by_as)
     dict_to_out(total_by_cdn)
-        
+
 
 if __name__ == "__main__":
     start = time.time()

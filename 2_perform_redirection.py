@@ -311,7 +311,7 @@ class Zgrab2Scanner(Scanner):
         force_session_tickets=False,
         min_version=0x0303,
         max_version=0x0303,
-        port=443,
+        port=1337,
         use_session_cache=1,
         session_cache_dir="cache",
     ):
@@ -321,7 +321,7 @@ class Zgrab2Scanner(Scanner):
         For documentation, see zgrab2 -h.
         """
         cmd = [
-            "zgrab2_tls13",
+                "./zgrab2_tls13/zgrab2",
         ]
 
         if probe not in ["http", "tls"]:
@@ -367,6 +367,7 @@ class Zgrab2Scanner(Scanner):
             status=Zgrab2ResumptionResultStatus.PENDING,
         )
         try:
+            print(f"Scanning {domain_from} from {addr_from} to {target_addrs} targets on version {version.name}")
             _res = self._scan(domain_from, addr_from, target_addrs, version, res)
             assert _res is res
             res = res.to_dict()
@@ -431,7 +432,7 @@ class Zgrab2Scanner(Scanner):
                 force_session_tickets=version != ScanVersion.TLS1_3,
                 min_version=min_version,
                 max_version=max_version,
-                port=443,
+                port=1337,
                 use_session_cache=2,
                 session_cache_dir=cache_dir,
             )
@@ -441,6 +442,7 @@ class Zgrab2Scanner(Scanner):
                 input=input_string,
                 capture_output=True,
             )
+            print(f"Invoked zgrab2: {initial_config=} with {input_string=}")
             res.initial_exitcode = initial.returncode
             res.initial_status_line = self._parse_status_line(initial)
             res.status = Zgrab2ResumptionResultStatus.INITIAL_RAN
@@ -465,7 +467,7 @@ class Zgrab2Scanner(Scanner):
                 redirects_succeed=True,
                 min_version=min_version,
                 max_version=max_version,
-                port=443,
+                port=1337,
                 use_session_cache=1,
                 session_cache_dir=cache_dir,
             )
@@ -542,18 +544,18 @@ class Domain:
             for target in _targets:
                 target_version, target_ip = target[0]
                 if target_version == "TLSv1.3":
-                    targets_13.append(Connectable(target_ip, 443))
+                    targets_13.append(Connectable(target_ip, 1337))
                 else:
-                    targets_pre13.append(Connectable(target_ip, 443))
+                    targets_pre13.append(Connectable(target_ip, 1337))
 
         # Always scann all domain,ip pairs, even if we do not have a target
         # This enables us to gather all bodies
         # if targets_13:
         if ScanVersion.TLS1_3 in versions_to_evaluate:
-            ScanContext.scanner.scan(self.domain, Connectable(source_ip, 443), targets_13, ScanVersion.TLS1_3)
+            ScanContext.scanner.scan(self.domain, Connectable(source_ip, 1337), targets_13, ScanVersion.TLS1_3)
         # if targets_pre13:
         if ScanVersion.PRE_1_3 in versions_to_evaluate:
-            ScanContext.scanner.scan(self.domain, Connectable(source_ip, 443), targets_pre13, ScanVersion.PRE_1_3)
+            ScanContext.scanner.scan(self.domain, Connectable(source_ip, 1337), targets_pre13, ScanVersion.PRE_1_3)
 
     def _evaluate_in_iptype(self, tfrom: IPType):
         if not isinstance(tfrom, IPType):

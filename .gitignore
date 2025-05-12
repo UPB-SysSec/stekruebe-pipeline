@@ -27,3 +27,6 @@ zdns/
 zgrab2_tls13/
 zmap/
 zmapv6/
+domains.txt
+hosts.txt
+mongo/
