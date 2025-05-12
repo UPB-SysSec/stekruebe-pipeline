@@ -79,4 +79,8 @@ date "+%s: %c"
 ./5__wrapper.sh
 date "+%s: %c"
 
+echo "[ ] Evaluating similarity analysis"
+date "+%s: %c"
+python3 7a_similarity_analysis.py
+date "+%s: %c"
 echo "[#] DONE"
