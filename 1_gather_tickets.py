@@ -699,7 +699,7 @@ class EXEUTABLES:
     ZDNS = "./zdns/zdns"
     ZMAP4 = "./zmap/src/zmap"
     ZMAP6 = "./zmapv6/src/zmap"
-    ZGRAB = "./zgrab2_tls13/zgrab2"
+    ZGRAB = "./zgrab2_tls13/cmd/zgrab2/zgrab2"
 
 
 if not op.isdir("out"):
@@ -757,7 +757,7 @@ def main(TRANCO_NUM=None, DRY_RUN=False, RUN_ID=0):
             "alookup",
             "--ipv4-lookup",
             "--ipv6-lookup",
-            "--name-servers=127.0.0.1:5353", # AE version
+            "--name-servers=127.0.0.1:8053", # AE version
             cache_as_format=FileFormat.TXT,
         )
         DUPLICATE_DOMAINS = DuplicateDomainFilter(stats)

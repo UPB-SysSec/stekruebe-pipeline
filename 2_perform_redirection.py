@@ -321,7 +321,7 @@ class Zgrab2Scanner(Scanner):
         For documentation, see zgrab2 -h.
         """
         cmd = [
-                "./zgrab2_tls13/zgrab2",
+                "./zgrab2_tls13/cmd/zgrab2/zgrab2",
         ]
 
         if probe not in ["http", "tls"]:

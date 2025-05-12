@@ -8,6 +8,6 @@ docker run -d --name stekruebe-dnsmasq \
   --network stekruebe-dummy-servers_steknet \
   --rm \
   -v "$PWD/hosts.txt:/etc/hosts:ro" \
-  -p 5353:53/udp \
+  -p 8053:53/udp \
   andyshinn/dnsmasq \
   -k --log-facility=- --no-resolv --addn-hosts=/etc/hosts

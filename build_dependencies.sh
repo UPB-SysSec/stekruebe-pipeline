@@ -47,25 +47,31 @@ function update()(
     return 0
 )
 
+echo "Updating zmap"
 update "https://github.com/zmap/zmap.git" "zmap" cmake
 
+echo "Updating zmapv6"
 update "https://github.com/XoMEX/zmapv6.git" "zmapv6" cmake
 
+echo "Updating zdns"
+rm -r zdns
 update "https://github.com/zmap/zdns.git" "zdns" make
 
-update "https://github.com/zmap/zgrab2.git" "zgrab2" make
+#echo "Updating zgrab2"
+#update "https://github.com/zmap/zgrab2.git" "zgrab2" make
 
 force_zgrab2_tls13="$force_build"
 if update "https://syssec-vm-deploy:gldt-pKetsVzcvBYAAPVzuXfu@git.cs.uni-paderborn.de/syssec/projects/steckruebe/zcrypto.git" "zcrypto_tls13" ret; then
     force_zgrab2_tls13=true
 fi
 
+echo "Updating zgrab13"
 if update "https://syssec-vm-deploy:gldt-CT5rxLcLs3n_JT3K6ZkC@git.cs.uni-paderborn.de/syssec/projects/steckruebe/zgrab2.git" "zgrab2_tls13" ret || [ "$force_zgrab2_tls13" == "true" ]; then
     (
         echo "Building zgrab2_tls13"
         cd "zgrab2_tls13"
         sed -i -E 's/replace github.com\/zmap\/zcrypto => .+/replace github.com\/zmap\/zcrypto => ..\/zcrypto_tls13/' go.mod
-        make
+        make zgrab2
         git restore go.mod
     )
 fi

@@ -7,3 +7,4 @@ pydantic
 numpy >= 2.0.0
 scipy
 matplotlib
+tqdm

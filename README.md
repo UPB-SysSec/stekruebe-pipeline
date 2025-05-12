@@ -1,4 +1,23 @@
 # Stekruebe Ticket Redirection Large Scale Scanning
+This artifact contains a slimmed-down version of the large-scale scanning setup for detecting session ticket confusion attacks in the wild.
+It has been modified to work with a local dummy server setup to demonstrate the functionality.
+
+## Usage
+The artifact consists of a series of (Python) scripts and Docker containers.
+### Requirements
+- Python 3.12+
+- Docker
+- Docker Compose
+- pip
+- golang 1.19+
+For Ubuntu 25.04, you can install the required dependencies with:
+```bash
+apt install python3-dev python3-full docker.io cmake libjudy-dev libgmp-dev libpcap-dev flex byacc libjson-c-dev gengetopt libunistring-dev golang
+systemctl start docker.service
+sudo curl -L "https://github.com/docker/compose/releases/download/2.35.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+```
+
 
 ## How to set up
 1. Build required dependencies (our custom forks of `zmap`, `zgrab2`, and `zdns`)
@@ -6,21 +25,21 @@
 sudo ./build_dependencies.sh
 ```
 `sudo` is required to give `zmap` access to the network interface.
+Check if the build was successful by running the binaries.
+```bash
+./zmapv6/src/zmap --help
+./zgrab2/cmd/zgrab2/zgrab2 --help
+./zdns/zdns --help
+```
 
 ## How to run
-1. Set up the local dummy servers
-```
-cd ae-dummy-servers
-docker-compose up -d
-```
-2. Setup DNS server for ZDNS
-```
-./generate_dummy_hosts.sh
-./run_local_dns.sh
+1. Set up the local dummy servers and DNS
+```bash
+./setup.sh
 ```
 Check if DNS resolution works:
 ```
-dig @127.0.0.1 -p 5353 a.com 
+dig @127.0.0.1 -p 8053 a.com 
 ```
 Should yield a `172.x.0.x` address.
 
