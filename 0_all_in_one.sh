@@ -19,6 +19,7 @@ fi
 
 docker stop steckruebe-html-database || true
 docker stop steckruebe-prefix-database || true
+docker stop steckruebe-mongodb || true
 
 echo "[#] Gathering Tickets"
 
@@ -48,6 +49,13 @@ sleep 30
 echo "[ ] Generating Clusters"
 ./generate_wcc.sh
 cd ..
+
+echo "[#] Preparing Mongo"
+date "+%s: %c"
+cd mongo/
+./run_mongo.sh
+cd ..
+date "+%s: %c"
 
 echo "[#] Running Scan (Sampling Neo4j)"
 date "+%s: %c"
