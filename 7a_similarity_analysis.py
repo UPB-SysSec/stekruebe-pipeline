@@ -80,6 +80,7 @@ def ip_to_asn(ip):
     asn = lookup_asn(ip)
     if asn is not None:
         return asn
+    return "Fake Local AS" # AE Version
 
 def ip_to_cdn(ip1, ip2):
     if is_akamai_ip(ip1) or is_akamai_ip(ip2):

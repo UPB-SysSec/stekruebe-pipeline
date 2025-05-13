@@ -4,7 +4,9 @@ cd "$(dirname $0)"
 
 LIMIT=180
 SLEEP=60
-RETRY=3
+# AE Version
+# RETRY=3
+RETRY=1
 
 TRY=1
 while true; do

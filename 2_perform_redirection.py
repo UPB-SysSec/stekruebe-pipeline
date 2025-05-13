@@ -442,7 +442,7 @@ class Zgrab2Scanner(Scanner):
                 input=input_string,
                 capture_output=True,
             )
-            print(f"Invoked zgrab2: {initial_config=} with {input_string=}")
+            print(f"Invoked zgrab2: {" ".join(initial_config)} with {input_string=}")
             res.initial_exitcode = initial.returncode
             res.initial_status_line = self._parse_status_line(initial)
             res.status = Zgrab2ResumptionResultStatus.INITIAL_RAN
@@ -453,6 +453,8 @@ class Zgrab2Scanner(Scanner):
             initial_version_key = ZgrabHelper.get_version_key(res.initial)
             if initial_version_key is None:
                 # print("failed before redirecting, no version key found")
+                print(f"Failed before redirecting no version for {domain_from=}, {addr_from=}")
+                print(res.initial)
                 res.status = Zgrab2ResumptionResultStatus.INITIAL_NO_VERSION
                 return res
             if not ZgrabHelper.has_ticket(res.initial):
@@ -507,8 +509,8 @@ CALL {{
 }}
 RETURN *
 ORDER BY rand()
-LIMIT 10
 """
+# AE Version: no LIMIT 10
 
 
 class Domain:
