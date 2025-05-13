@@ -18,7 +18,6 @@ sudo curl -L "https://github.com/docker/compose/releases/download/2.35.1/docker-
 sudo chmod +x /usr/local/bin/docker-compose
 ```
 
-
 ## How to set up
 1. Build required dependencies (our custom forks of `zmap`, `zgrab2`, and `zdns`)
 ```
@@ -27,9 +26,16 @@ sudo ./build_dependencies.sh
 `sudo` is required to give `zmap` access to the network interface.
 Check if the build was successful by running the binaries.
 ```bash
+./zdns/zdns --help
+./zmap/src/zmap --help
 ./zmapv6/src/zmap --help
 ./zgrab2/cmd/zgrab2/zgrab2 --help
-./zdns/zdns --help
+```
+
+Also check that the dummy server and corresponding DNS resolution are working:
+```bash
+./setup.sh #for running
+dig @127.0.0.1 -p 8053 a.com
 ```
 
 ## How to run
@@ -54,3 +60,6 @@ from `zmap`, you need to give `zmap` the required permissions (manually) to acce
 sudo setcap cap_net_raw=eip zmapv6/src/zmap                                                                                               
 sudo setcap cap_net_raw=eip zmap/src/zmap
 ```
+### Something "connection refused", but only with `zgrab2`
+Make sure that your host `/etc/hosts` does not contain any entries for `{a,b,c,d}.com`, as this may interfere with the DNS setup.
+We had to learn this the hard way.
