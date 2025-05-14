@@ -176,14 +176,14 @@ with open("../out/7_merged_zgrab_all.json") as f, \
                     edges.add(Edge(domain_node, prefix16, "ISSUES"))
 
 
-print("[2] Writing headers to csv")
-for object in [DomainNode, IPNode, PrefixNode, Edge]:
-    with open(object._HEADER_FILENAME, "w") as f:
-        f.write(object.header())
+    print("[2] Writing headers to csv")
+    for object in [DomainNode, IPNode, PrefixNode, Edge]:
+        with open(object._HEADER_FILENAME, "w") as f:
+            f.write(object.header())
 
-print("[3] Writing edges to csv")
-for e in tqdm(edges):
-    e.write_to_csv()
-print("[4] Writing nodes to csv")
-for n in tqdm(nodes):
-    n.write_to_csv()
+    print("[3] Writing edges to csv")
+    for e in tqdm(edges):
+        e.write_to_csv()
+    print("[4] Writing nodes to csv")
+    for n in tqdm(nodes):
+        n.write_to_csv()
