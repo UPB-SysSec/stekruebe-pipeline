@@ -43,9 +43,9 @@ python3 generate_prefix_bulk_csv.py
 date "+%s: %c"
 echo "[ ] Importing into Neo4j"
 ./import_prefix_csv.sh
-echo "[ ] Starting Neo4j"
+echo "[ ] Starting Neo4j (excessive timeout because of VM experiences)"
 ./run_prefix_neo4j.sh
-sleep 30
+sleep 60
 echo "[ ] Generating Clusters"
 ./generate_wcc.sh
 cd ..

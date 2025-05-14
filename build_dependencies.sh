@@ -54,7 +54,7 @@ echo "Updating zmapv6"
 update "https://github.com/XoMEX/zmapv6.git" "zmapv6" cmake
 
 echo "Updating zdns"
-rm -r zdns
+rm -r zdns || true
 update "https://github.com/zmap/zdns.git" "zdns" make
 
 #echo "Updating zgrab2"

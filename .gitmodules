@@ -1,6 +1,7 @@
 [submodule "ae-dummy-servers"]
 	path = ae-dummy-servers
-	url = ssh://irb-git@git.cs.uni-paderborn.de:2222/syssec/projects/steckruebe/ae-dummy-servers.git
+    url = https://git.cs.uni-paderborn.de/syssec/projects/steckruebe/ae-dummy-servers.git
 [submodule "asn-ip"]
 	path = asn-ip
 	url = https://github.com/ipverse/asn-ip
+    shallow = true
