@@ -42,7 +42,8 @@ class Node:
 class PrefixNode(Node):
     _FILENAME = "import/prefixes.csv"
     _HEADER_FILENAME = "import/prefixes_header.csv"
-    _WRITER = csv.writer(open(_FILENAME, "w"))
+    _FILE = open(_FILENAME, "w")
+    _WRITER = csv.writer(_FILE)
 
     def __init__(self, prefix, version, scan):
         self.prefix_length = len(prefix) // 2  # hex, but we want bytes length
@@ -71,7 +72,8 @@ class PrefixNode(Node):
 class DomainNode(Node):
     _FILENAME = "import/domains.csv"
     _HEADER_FILENAME = "import/domains_header.csv"
-    _WRITER = csv.writer(open(_FILENAME, "w"))
+    _FILE = open(_FILENAME, "w")
+    _WRITER = csv.writer(_FILE)
 
     def __init__(self, domain):
         super().__init__(content=domain, label="DOMAIN")
@@ -83,7 +85,8 @@ class DomainNode(Node):
 class IPNode(Node):
     _FILENAME = "import/ips.csv"
     _HEADER_FILENAME = "import/ips_header.csv"
-    _WRITER = csv.writer(open(_FILENAME, "w"))
+    _FILE = open(_FILENAME, "w")
+    _WRITER = csv.writer(_FILE)
 
     def __init__(self, ip):
         is_ipv6 = ":" in ip
@@ -98,7 +101,8 @@ class IPNode(Node):
 class Edge:
     _FILENAME = "import/relationships.csv"
     _HEADER_FILENAME = "import/relationships_header.csv"
-    _WRITER = csv.writer(open(_FILENAME, "w"))
+    _FILE = open(_FILENAME, "w")
+    _WRITER = csv.writer(_FILE)
     uid: int
     src: hash(Node)
     dst: hash(Node)
@@ -178,3 +182,11 @@ for e in tqdm(edges):
 print("[4] Writing nodes to csv")
 for n in tqdm(nodes):
     n.write_to_csv()
+
+# yeah never play with raw file handles again
+Node._FILE.close()
+Edge._FILE.close()
+DomainNode._FILE.close()
+IPNode._FILE.close()
+PrefixNode._FILE.close()
+print("[5] Done")
