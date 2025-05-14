@@ -184,7 +184,6 @@ for n in tqdm(nodes):
     n.write_to_csv()
 
 # yeah never play with raw file handles again
-Node._FILE.close()
 Edge._FILE.close()
 DomainNode._FILE.close()
 IPNode._FILE.close()
