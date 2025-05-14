@@ -16,7 +16,6 @@ edges = set()
 class Node:
     _FILENAME = ""
     _HEADER_FILENAME = ""
-    _WRITER = csv.writer(sys.stdout)
     uid: int
     content: str
     labels: str
