@@ -31,6 +31,7 @@ class Node:
     def row(self):
         return (self.uid, self.content, self.labels)
 
+    @staticmethod
     def header():
         return ":ID,content,:LABEL"
 
@@ -53,6 +54,7 @@ class PrefixNode(Node):
     def __hash__(self):
         return hash((self.content, self.prefix_length, self.version, self.scan, self.labels))
 
+    @staticmethod
     def header():
         return ":ID,prefix,length:int,version,scan,:LABEL"
 
@@ -75,6 +77,7 @@ class DomainNode(Node):
     def __init__(self, domain):
         super().__init__(content=domain, label="DOMAIN")
 
+    @staticmethod
     def header():
         return ":ID,domain,:LABEL"
 
@@ -89,6 +92,7 @@ class IPNode(Node):
         label = "IP;" + ("IPV6" if is_ipv6 else "IPV4")
         super().__init__(content=ip, label=label)
 
+    @staticmethod
     def header():
         return ":ID,ip,:LABEL"
 
@@ -115,6 +119,7 @@ class Edge:
     def row(self):
         return (self.src, self.dst, self.label)
 
+    @staticmethod
     def header():
         return ":START_ID,:END_ID,:TYPE"
 
@@ -176,9 +181,13 @@ with open("../out/7_merged_zgrab_all.json") as f, \
 
 
     print("[2] Writing headers to csv")
-    for object in [DomainNode, IPNode, PrefixNode, Edge]:
-        with open(object._HEADER_FILENAME, "w") as f:
-            f.write(object.header())
+    for obj in [DomainNode, IPNode, PrefixNode, Edge]:
+        print(f"Writing header for {obj.__name__} to {obj._HEADER_FILENAME}")
+        with open(obj._HEADER_FILENAME, "w") as f:
+            hdr = obj.header()
+            print(f"Header: {hdr}")
+            f.write(hdr + "\n")
+
 
     print("[3] Writing edges to csv")
     for e in tqdm(edges):
