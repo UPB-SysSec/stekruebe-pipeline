@@ -48,6 +48,13 @@ which should yield two `172.x.0.x` addresses.
 ```bash
 ./0_all_in_one.sh
 ```
+3. Examine the `analysisdump` folder for the results of the scans.
+The folder contains a list of all potentially successful resumptions across hosts, grouped by AS.
+        Within, each path \mintinline{bash}{./<target IP>/<source IP>/} contains a separate scan result.
+I.e. the folder \mintinline{bash}{./172.19.0.5/172.19.0.3/} contains the different resulting HTML documents when resuming at \texttt{.5} with a ticket from \texttt{.3}:
+\texttt{0\_initial.html} is the original page at \texttt{.3}, without a ticket. \texttt{1\_resumed.html} contains the page received by \texttt{.5} after resumption.
+\texttt{2\_*\_supposed\_origin.html} contains the closest HTML match, for \texttt{1\_resumed.html}, based on different metrics.
+\texttt{\_meta.md} summarizes these findings, including which domain we believe to have encountered.
 ## Troubleshooting
 ### ZMap does not have permission to access the network interface
 If you get something like
