@@ -2,7 +2,6 @@ from dataclasses import dataclass
 import csv
 import base64
 import json
-from tqdm import tqdm
 import sys
 
 # for a useful progress bar
@@ -142,9 +141,7 @@ with open("../out/7_merged_zgrab_all.json") as f, \
     f.seek(0, 2)
     file_length = f.tell()
     f.seek(0)
-    progress = tqdm(total=file_length, unit="B", unit_scale=True)
     while ln := f.readline():
-        progress.update(len(ln))
         item = json.loads(ln)
 
         ip_node = IPNode(item["ip"])
@@ -190,8 +187,8 @@ with open("../out/7_merged_zgrab_all.json") as f, \
 
 
     print("[3] Writing edges to csv")
-    for e in tqdm(edges):
+    for e in (edges):
         e.write_to_csv()
     print("[4] Writing nodes to csv")
-    for n in tqdm(nodes):
+    for n in (nodes):
         n.write_to_csv()

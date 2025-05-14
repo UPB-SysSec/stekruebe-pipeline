@@ -65,7 +65,7 @@ if update "https://syssec-vm-deploy:gldt-pKetsVzcvBYAAPVzuXfu@git.cs.uni-paderbo
     force_zgrab2_tls13=true
 fi
 
-echo "Updating zgrab13"
+echo "Updating zgrab2_tls13"
 if update "https://syssec-vm-deploy:gldt-CT5rxLcLs3n_JT3K6ZkC@git.cs.uni-paderborn.de/syssec/projects/steckruebe/zgrab2.git" "zgrab2_tls13" ret || [ "$force_zgrab2_tls13" == "true" ]; then
     (
         echo "Building zgrab2_tls13"
