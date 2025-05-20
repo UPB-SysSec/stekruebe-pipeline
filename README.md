@@ -1,7 +1,10 @@
 # Stekruebe Ticket Redirection Large Scale Scanning
 This artifact contains a slimmed-down version of the large-scale scanning setup for detecting session ticket confusion attacks in the wild.
 It has been modified to work with a local dummy server setup to demonstrate the functionality.
-This repository relies on a custom fork of `zgrab2` and `zcrypto` to support the required functionality, which are built using the `build_dependencies.sh` script.
+The original setup was heavily customized for our own infrastructure, so functionality was removed to make it easier to run on a local machine (e.g. running `zmap` against Docker containers doesn't work well).
+All changes are marked with comments `# AE Version` in the code.
+
+Note that this repository relies on a custom fork of `zgrab2` and `zcrypto` to support the required functionality, which are built using the `build_dependencies.sh` script.
 
 ## Usage
 The artifact itself consists of a series of (Python) scripts and Docker containers.
@@ -41,7 +44,7 @@ Check if the build was successful by running the binaries.
 
 Also check that the dummy server and corresponding DNS resolution are working:
 ```bash
-./setup.sh
+sudo ./setup.sh
 dig @127.0.0.1 -p 8053 a.com
 ```
 which should yield two `172.x.0.x` addresses.
@@ -49,19 +52,19 @@ which should yield two `172.x.0.x` addresses.
 ## How to run
 1. Set up the local dummy servers and DNS
 ```bash
-./setup.sh
+sudo ./setup.sh
 ```
 2. Run the all-in-one script
 ```bash
-./0_all_in_one.sh
+sudo ./0_all_in_one.sh
 ```
 3. Examine the `analysisdump` folder for the results of the scans.
 The folder contains a list of all potentially successful resumptions across hosts, grouped by AS.
-        Within, each path \mintinline{bash}{./<target IP>/<source IP>/} contains a separate scan result.
-I.e. the folder \mintinline{bash}{./172.19.0.5/172.19.0.3/} contains the different resulting HTML documents when resuming at \texttt{.5} with a ticket from \texttt{.3}:
-\texttt{0\_initial.html} is the original page at \texttt{.3}, without a ticket. \texttt{1\_resumed.html} contains the page received by \texttt{.5} after resumption.
-\texttt{2\_*\_supposed\_origin.html} contains the closest HTML match, for \texttt{1\_resumed.html}, based on different metrics.
-\texttt{\_meta.md} summarizes these findings, including which domain we believe to have encountered.
+        Within, each path `./<target IP>/<source IP>/` contains a separate scan result.
+I.e. the folder `./172.19.0.5/172.19.0.3/` contains the different resulting HTML documents when resuming at **.5** with a ticket from **.3**:
+`0_initial.html` is the original page at **.3**, without a ticket. `1_resumed.html` contains the page received by **.5** after resumption.
+`2_*_supposed_origin.html` contains the closest HTML match, for `1_resumed.html`, based on different metrics.
+`_meta.md` summarizes these findings, including which domain we believe to have encountered.
 ## Troubleshooting
 ### ZMap does not have permission to access the network interface
 If you get something like
@@ -78,4 +81,4 @@ Make sure that your host `/etc/hosts` does not contain any entries for `{a,b,c,d
 We had to learn this the hard way.
 
 ### "Connection Refused" when "Generating clusters"
-The `sleep` for spawning Neo4J may not be sufficient (also considering pulling the image for the first time). Try to increase the sleep delay, and execute `neo4j/run_prefix_neo4j.sh` manually once.
+The `sleep` for spawning Neo4J may not be sufficient to actually start. Try to increase the sleep delay.
