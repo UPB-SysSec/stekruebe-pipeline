@@ -1,9 +1,10 @@
 # Stekruebe Ticket Redirection Large Scale Scanning
 This artifact contains a slimmed-down version of the large-scale scanning setup for detecting session ticket confusion attacks in the wild.
 It has been modified to work with a local dummy server setup to demonstrate the functionality.
+This repository relies on a custom fork of `zgrab2` and `zcrypto` to support the required functionality, which are built using the `build_dependencies.sh` script.
 
 ## Usage
-The artifact consists of a series of (Python) scripts and Docker containers.
+The artifact itself consists of a series of (Python) scripts and Docker containers.
 ### Requirements
 - Python 3.12+
 - Docker
@@ -19,7 +20,7 @@ sudo chmod +x /usr/local/bin/docker-compose
 ```
 
 ## How to set up
-1. Build required dependencies (our custom forks of `zmap`, `zgrab2`, and `zdns`)
+1. Build required dependencies (our custom fork of `zgrab2` and appropiate versions of `zmap` and `zdns`)
 ```
 sudo ./build_dependencies.sh
 ```
