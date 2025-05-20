@@ -61,12 +61,12 @@ update "https://github.com/zmap/zdns.git" "zdns" make
 #update "https://github.com/zmap/zgrab2.git" "zgrab2" make
 
 force_zgrab2_tls13="$force_build"
-if update "https://syssec-vm-deploy:gldt-pKetsVzcvBYAAPVzuXfu@git.cs.uni-paderborn.de/syssec/projects/steckruebe/zcrypto.git" "zcrypto_tls13" ret; then
+if update "https://github.com/UPB-SysSec/zcrypto.git" "zcrypto_tls13" ret; then
     force_zgrab2_tls13=true
 fi
 
 echo "Updating zgrab2_tls13"
-if update "https://syssec-vm-deploy:gldt-CT5rxLcLs3n_JT3K6ZkC@git.cs.uni-paderborn.de/syssec/projects/steckruebe/zgrab2.git" "zgrab2_tls13" ret || [ "$force_zgrab2_tls13" == "true" ]; then
+if update "https://github.com/UPB-SysSec/zgrab2.git" "zgrab2_tls13" ret || [ "$force_zgrab2_tls13" == "true" ]; then
     (
         echo "Building zgrab2_tls13"
         cd "zgrab2_tls13"

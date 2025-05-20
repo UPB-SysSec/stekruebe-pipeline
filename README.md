@@ -5,13 +5,14 @@ This repository relies on a custom fork of `zgrab2` and `zcrypto` to support the
 
 ## Usage
 The artifact itself consists of a series of (Python) scripts and Docker containers.
+Instructions here are based on a clean Ubuntu 25.04 installation, but should work on other distributions as well.
 ### Requirements
 - Python 3.12+
 - Docker
 - Docker Compose
 - pip
 - golang 1.19+
-For Ubuntu 25.04, you can install the required dependencies with:
+You can install these dependencies using the following commands:
 ```bash
 apt install python3-dev python3-full docker.io cmake libjudy-dev libgmp-dev libpcap-dev flex byacc libjson-c-dev gengetopt libunistring-dev golang
 systemctl start docker.service
@@ -35,7 +36,7 @@ Check if the build was successful by running the binaries.
 
 Also check that the dummy server and corresponding DNS resolution are working:
 ```bash
-./setup.sh #for running
+./setup.sh
 dig @127.0.0.1 -p 8053 a.com
 ```
 which should yield two `172.x.0.x` addresses.
