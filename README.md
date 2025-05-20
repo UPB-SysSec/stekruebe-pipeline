@@ -19,6 +19,11 @@ systemctl start docker.service
 sudo curl -L "https://github.com/docker/compose/releases/download/v2.35.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 sudo chmod +x /usr/local/bin/docker-compose
 ```
+Also make sure that you have cloned the submodules, either by using the `--recurse-submodules` flag when cloning or by running:
+```bash
+git submodule init
+git submodule update
+```
 
 ## How to set up
 1. Build required dependencies (our custom fork of `zgrab2` and appropiate versions of `zmap` and `zdns`)
