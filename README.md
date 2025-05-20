@@ -6,10 +6,16 @@ All changes are marked with comments `# AE Version` in the code.
 
 Note that this repository relies on a custom fork of `zgrab2` and `zcrypto` to support the required functionality, which are built using the `build_dependencies.sh` script.
 
-## Usage
+## Installation
 The artifact itself consists of a series of (Python) scripts and Docker containers.
 Instructions here are based on a clean Ubuntu 25.04 installation, but should work on other distributions as well.
-### Requirements
+### Pre-requisites
+Make sure that you have cloned the submodules, either by using the `--recurse-submodules` flag when cloning or by running:
+```bash
+git submodule init
+git submodule update
+```
+### Dependencies
 - Python 3.12+
 - Docker
 - Docker Compose
@@ -21,11 +27,6 @@ apt install python3-dev python3-full docker.io cmake libjudy-dev libgmp-dev libp
 systemctl start docker.service
 sudo curl -L "https://github.com/docker/compose/releases/download/v2.35.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 sudo chmod +x /usr/local/bin/docker-compose
-```
-Also make sure that you have cloned the submodules, either by using the `--recurse-submodules` flag when cloning or by running:
-```bash
-git submodule init
-git submodule update
 ```
 
 ## How to set up
@@ -47,7 +48,7 @@ Also check that the dummy server and corresponding DNS resolution are working:
 sudo ./setup.sh
 dig @127.0.0.1 -p 8053 a.com
 ```
-which should yield two `172.x.0.x` addresses.
+which should yield two `172.x.0.x` local Docker IP addresses.
 
 ## How to run
 1. Set up the local dummy servers and DNS
