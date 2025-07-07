@@ -20,7 +20,7 @@ git submodule update
 - Docker
 - Docker Compose
 - pip
-- golang 1.19+
+- golang 1.20+
 You can install these dependencies using the following commands:
 ```bash
 apt install python3-dev python3-full docker.io cmake libjudy-dev libgmp-dev libpcap-dev flex byacc libjson-c-dev gengetopt libunistring-dev golang curl git
