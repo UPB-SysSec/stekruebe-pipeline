@@ -23,7 +23,7 @@ git submodule update
 - golang 1.20+
 You can install these dependencies using the following commands:
 ```bash
-apt install python3-dev python3-full docker.io cmake libjudy-dev libgmp-dev libpcap-dev flex byacc libjson-c-dev gengetopt libunistring-dev golang curl git
+apt install python3.13-dev python3.13-full python3.13-venv docker.io cmake jq libjudy-dev libgmp-dev libpcap-dev flex byacc libjson-c-dev gengetopt libunistring-dev golang-1.24 curl git
 systemctl start docker.service
 sudo curl -L "https://github.com/docker/compose/releases/download/v2.35.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 sudo chmod +x /usr/local/bin/docker-compose

@@ -9,7 +9,7 @@ fi
 
 if ! [ -d ".venv" ]; then
     echo "[#] Creating venv"
-    python3 -m venv .venv
+    python3.13 -m venv .venv
     . .venv/bin/activate
     pip install -r requirements.txt
 else
@@ -24,8 +24,8 @@ docker stop steckruebe-mongodb || true
 echo "[#] Gathering Tickets"
 
 date "+%s: %c"
-# python3 1_gather_tickets.py ../tranco_V9V2N.csv 1000000
-python3 1_gather_tickets.py domains.txt
+# python3.13 1_gather_tickets.py ../tranco_V9V2N.csv 1000000
+python3.13 1_gather_tickets.py domains.txt
 date "+%s: %c"
 
 cat out/7_merged_zgrab.r*.json > out/7_merged_zgrab_all.json
@@ -39,7 +39,7 @@ fi
 
 echo "[#] Preparing for Neo4j"
 date "+%s: %c"
-python3 generate_prefix_bulk_csv.py
+python3.13 generate_prefix_bulk_csv.py
 date "+%s: %c"
 echo "[ ] Importing into Neo4j"
 ./import_prefix_csv.sh
@@ -59,19 +59,19 @@ date "+%s: %c"
 
 echo "[#] Running Scan (Sampling Neo4j)"
 date "+%s: %c"
-python3 2_perform_redirection.py
+python3.13 2_perform_redirection.py
 date "+%s: %c"
 
 docker stop steckruebe-prefix-database
 
 echo "[ ] Transfering scan results to neo4j"
 date "+%s: %c"
-python3 3_transfer_redirection_results_to_neo4j.py
+python3.13 3_transfer_redirection_results_to_neo4j.py
 # date "+%s: %c"
 
 echo "[ ] Creating SIM edges"
 date "+%s: %c"
-python3 4_create_sim_edges.py
+python3.13 4_create_sim_edges.py
 date "+%s: %c"
 
 echo "[ ] Computing SIM edge values"
@@ -81,6 +81,6 @@ date "+%s: %c"
 
 echo "[ ] Evaluating similarity analysis"
 date "+%s: %c"
-python3 7a_similarity_analysis.py
+python3.13 7a_similarity_analysis.py
 date "+%s: %c"
 echo "[#] DONE"
