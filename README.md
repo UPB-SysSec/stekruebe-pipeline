@@ -8,7 +8,7 @@ Note that this repository relies on a custom fork of `zgrab2` and `zcrypto` to s
 
 ## Installation
 The artifact itself consists of a series of (Python) scripts and Docker containers.
-Instructions here are based on a clean Ubuntu 25.04 installation, but should work on other distributions as well.
+The instructions here are designed for **Ubuntu 25.04**, but should be easily adaptable to other Linux distributions.
 ### Pre-requisites
 Make sure that you have cloned the submodules, either by using the `--recurse-submodules` flag when cloning or by running:
 ```bash
@@ -21,7 +21,9 @@ git submodule update
 - Docker Compose
 - pip
 - golang 1.20+
-You can install these dependencies using the following commands:
+
+For **Ubuntu 25.04**, the following commands installs all required dependencies.
+If you are using a different distribution, you may need to adapt the package names, as not all versions package the same versions of the dependencies (e.g. Ubuntu 24 does not offer `python3.13`).
 ```bash
 apt install python3.13-dev python3.13-full python3.13-venv docker.io cmake jq libjudy-dev libgmp-dev libpcap-dev flex byacc libjson-c-dev gengetopt libunistring-dev golang-1.24 curl git
 systemctl start docker.service
@@ -66,6 +68,17 @@ I.e. the folder `./172.19.0.5/172.19.0.3/` contains the different resulting HTML
 `0_initial.html` is the original page at **.3**, without a ticket. `1_resumed.html` contains the page received by **.5** after resumption.
 `2_*_supposed_origin.html` contains the closest HTML match, for `1_resumed.html`, based on different metrics.
 `_meta.md` summarizes these findings, including which domain we believe to have encountered.
+
+## Testing different countermeasures
+4. Observe the effects of different countermeasures by modifying the file `ae-dummy-servers/docker-compose.yml` and re-running steps 1-3.
+You can activate a countermeasure by uncommenting the corresponding lines in the environment section.
+```
+# - "NO_FALLBACK_CERT=1" # fail the handshake if the SNI is unknown
+# - "NO_FALLBACK_CONTENT=1" # serve an HTTP error if the SNI is unknown; NB our implementation does not look at the host header at all
+# - "NO_FALLBACK_STEK=1" # do not set a STEK if the SNI is unknown
+# - "BIND_CERT=1" # bind the certificate to the ticket
+# - "BIND_SNI=1" # bind the SNI to the ticket
+```
 ## Troubleshooting
 ### ZMap does not have permission to access the network interface
 If you get something like
@@ -83,3 +96,13 @@ We had to learn this the hard way.
 
 ### "Connection Refused" when "Generating clusters"
 The `sleep` for spawning Neo4J may not be sufficient to actually start. Try to increase the sleep delay.
+
+## Original experiments
+As explained above, this artifact is a slimmed-down version of the original experiments.
+If you are interested in re-running the original experiments, beware of the resource requirements.
+
+Our setup:
+`uname -a`: `Linux syssec-scanner6 6.1.0-37-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.140-1 (2025-05-22) x86_64 GNU/Linux`
+64 cores, Intel(R) Xeon(R) Platinum 8462Y+
+64 GB RAM
+2 TB Storage (our results are about 900 GB)
