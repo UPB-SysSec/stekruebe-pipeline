@@ -9,12 +9,15 @@ Note that this repository relies on a custom fork of `zgrab2` and `zcrypto` to s
 ## Installation
 The artifact itself consists of a series of (Python) scripts and Docker containers.
 The instructions here are designed for **Ubuntu 25.04**, but should be easily adaptable to other Linux distributions.
-### Pre-requisites
+### Pre-requisites (GitHub version)
 Make sure that you have cloned the submodules, either by using the `--recurse-submodules` flag when cloning or by running:
 ```bash
 git submodule init
 git submodule update
 ```
+### Pre-requisites (Zenodo version)
+Nothing, see below.
+
 ### Dependencies
 - Python 3.12+
 - Docker
@@ -25,7 +28,7 @@ git submodule update
 For **Ubuntu 25.04**, the following commands installs all required dependencies.
 If you are using a different distribution, you may need to adapt the package names, as not all versions package the same versions of the dependencies (e.g. Ubuntu 24 does not offer `python3.13`).
 ```bash
-apt install python3.13-dev python3.13-full python3.13-venv docker.io cmake jq libjudy-dev libgmp-dev libpcap-dev flex byacc libjson-c-dev gengetopt libunistring-dev golang-1.24 curl git
+apt install python3.13-dev python3.13-full python3.13-venv docker.io cmake jq libjudy-dev libgmp-dev libpcap-dev flex byacc libjson-c-dev gengetopt libunistring-dev golang-go curl git
 systemctl start docker.service
 sudo curl -L "https://github.com/docker/compose/releases/download/v2.35.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 sudo chmod +x /usr/local/bin/docker-compose
